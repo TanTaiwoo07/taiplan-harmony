@@ -80,6 +80,7 @@ export class TaskService {
     next.completed = PlanningService.isEvent(next) ? false : task.completed;
     next.updatedAt = now;
     next.sortOrder = task.sortOrder;
+    if (task.overrides) { next.overrides = JSON.parse(JSON.stringify(task.overrides)); }
     if (JSON.stringify(next.steps) === JSON.stringify(task.steps ?? [])) { next.doneSteps = (task.doneSteps ?? []).slice(); }
     if (next.repeat !== 'none') { next.completed = false; next.doneSteps = []; }
     return next;
@@ -94,6 +95,7 @@ export class TaskService {
       startMinute: task.startMinute ?? -1, durationMinutes: task.durationMinutes ?? 30,
       steps: (task.steps ?? []).slice(), doneSteps: (task.doneSteps ?? []).slice() };
     if (task.planning) { result.planning = PlanningService.forTask(task); }
+    if (task.overrides) { result.overrides = JSON.parse(JSON.stringify(task.overrides)); }
     return result;
   }
   static section(tasks: Task[], completed: boolean, query: string = '', tag: string = ''): Task[] {

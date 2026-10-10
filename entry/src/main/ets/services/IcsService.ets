@@ -1,3 +1,5 @@
+import { PlanningService } from './PlanningService';
+import { OccurrenceService } from './OccurrenceService';
 import { BackupDocument, OccurrenceState, Task } from '../model/Task';
 import { TaskService } from './TaskService';
 import { ScheduleService } from './ScheduleService';
@@ -57,7 +59,8 @@ export class IcsService {
       if (prop.name === 'BEGIN') { nested++; continue; }
       if (prop.name === 'END') { nested--; continue; }
       if (nested > 0) { continue; }
-      if (['RRULE', 'RDATE', 'EXDATE', 'RECURRENCE-ID', 'DURATION'].includes(prop.name)) { throw new Error(`${prop.name} 暂不支持，请先导出展开后的单次事件`); }
+      if (['RDATE', 'RECURRENCE-ID', 'DURATION'].includes(prop.name)) { throw new Error(`${prop.name} 暂不支持，请先导出展开后的单次事件`); }
+      if (prop.name === 'EXDATE') { continue; }
       if (values.has(prop.name)) { throw new Error(`重复属性 ${prop.name}`); }
       values.set(prop.name, prop);
     }
@@ -84,9 +87,29 @@ export class IcsService {
       values.get('URL')?.value ?? ''].filter((part: string) => part.length > 0).join('\n');
     const priority = Number(values.get('PRIORITY')?.value ?? 0);
     const date = new Date(start.timestamp);
+    const minute = start.allDay ? -1 : date.getHours() * 60 + date.getMinutes();
+    const plan = PlanningService.create(ScheduleService.end(key), minute, duration, values.has('X-TAIPLAN-COMPLETED') ? 'task' : 'event');
+    plan.location = IcsService.unescape(values.get('LOCATION')?.value ?? ''); plan.sourceType = 'ics';
+    let repeat = 'none';
+    const rule = values.get('RRULE');
+    if (rule) {
+      const parts = new Map<string, string>();
+      for (const field of rule.value.split(';')) { const pair = field.split('=');
+        if (pair.length !== 2 || parts.has(pair[0]) || !['FREQ', 'INTERVAL', 'BYDAY', 'COUNT', 'UNTIL', 'WKST'].includes(pair[0])) { throw new Error('RRULE 包含不支持的字段'); } parts.set(pair[0], pair[1]); }
+      repeat = (parts.get('FREQ') ?? '').toLowerCase();
+      if (!['daily', 'weekly', 'monthly', 'yearly'].includes(repeat) || (parts.has('WKST') && parts.get('WKST') !== 'MO')) { throw new Error('RRULE 频率或周起始不支持'); }
+      if ((repeat === 'monthly' && date.getDate() > 28) || (repeat === 'yearly' && date.getMonth() === 1 && date.getDate() === 29)) { throw new Error('RRULE 月末或闰日跳过语义暂不支持'); }
+      plan.rule.interval = Number(parts.get('INTERVAL') ?? 1); plan.rule.count = Number(parts.get('COUNT') ?? 0);
+      if (parts.has('BYDAY')) { if (repeat !== 'weekly') { throw new Error('RRULE BYDAY 仅支持每周'); }
+        plan.rule.weekdays = (parts.get('BYDAY') ?? '').split(',').map((day: string) => ['MO','TU','WE','TH','FR','SA','SU'].indexOf(day) + 1); }
+      if (parts.has('UNTIL')) { const until = IcsService.date({ name: 'UNTIL', head: 'UNTIL', value: parts.get('UNTIL') ?? '' });
+        plan.rule.untilDate = ScheduleService.key(until.timestamp);
+        if (!until.allDay) { const boundary = new Date(until.timestamp); if (boundary.getHours() * 60 + boundary.getMinutes() < minute) { plan.rule.untilDate = ScheduleService.shift(plan.rule.untilDate, -1); } }
+      }
+    }
     const task = TaskService.create({ title: IcsService.unescape(values.get('SUMMARY')?.value ?? ''), note: note,
       priority: priority >= 1 && priority <= 4 ? 2 : priority >= 6 && priority <= 9 ? 0 : 1,
-      tagsText: '日历导入', dueAt: ScheduleService.end(key), repeat: 'none',
+      tagsText: '日历导入', dueAt: ScheduleService.end(key), repeat: repeat, planning: plan,
       startMinute: start.allDay ? -1 : date.getHours() * 60 + date.getMinutes(), durationMinutes: duration }, `ics:${uid}`, now);
     task.completed = values.get('X-TAIPLAN-COMPLETED')?.value === 'TRUE';
     return task;
@@ -96,28 +119,48 @@ export class IcsService {
     const lines = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n[ \t]/g, '').split('\n');
     if (!lines.includes('BEGIN:VCALENDAR') || !lines.includes('END:VCALENDAR')) { throw new Error('不是完整的 iCalendar 文件'); }
     const tasks: Task[] = [], notes: string[] = [], event: string[] = [];
-    const ids = new Set<string>();
+    const occurrences: OccurrenceState[] = []; const groups = new Map<string, string[][]>();
     let active = false, total = 0;
     for (const line of lines) {
-      if (line === 'BEGIN:VEVENT') {
-        if (active) { throw new Error('日历事件嵌套错误'); }
-        active = true; event.length = 0; continue;
-      }
+      if (line === 'BEGIN:VEVENT') { if (active) { throw new Error('日历事件嵌套错误'); } active = true; event.length = 0; continue; }
       if (line === 'END:VEVENT') {
-        if (!active) { throw new Error('日历事件结构错误'); }
-        active = false; total++;
+        if (!active) { throw new Error('日历事件结构错误'); } active = false; total++;
         if (total > 5000) { throw new Error('最多导入 5000 条事件'); }
-        try {
-          const task = IcsService.event(event, now);
-          if (ids.has(task.id)) { throw new Error('文件中 UID 重复'); }
-          ids.add(task.id); tasks.push(task);
-        } catch (error) { notes.push(`第 ${total} 条：${(error as Error).message}`); }
+        const uid = event.find((value: string) => value.startsWith('UID:')) ?? 'missing:' + total.toString();
+        const entries = groups.get(uid) ?? []; entries.push(event.slice()); groups.set(uid, entries);
       } else if (active && line.length > 0) { event.push(line); }
-      else if (line === 'BEGIN:VTODO') { notes.push('VTODO 待办组件暂不支持'); }
     }
     if (active) { throw new Error('日历事件未结束'); }
-    return { document: { format: 'TaiPlanHarmony', version: 4, exportedAt: now, tasks: tasks, occurrences: [] }, notes: notes, total: total };
+    for (const entries of groups.values()) {
+      const masters = entries.filter((entry: string[]) => !entry.some((line: string) => /^RECURRENCE-ID[;:]/.test(line)));
+      try {
+        if (!masters.length) { throw new Error('缺少重复系列主事件'); }
+        let task = IcsService.event(masters[0], now);
+        for (let i = 1; i < masters.length; i++) { try { IcsService.event(masters[i], now); notes.push(task.title + '：UID 重复，保留首个主事件'); } catch (error) { notes.push(task.title + '：' + (error as Error).message); } }
+        const exceptions: OccurrenceState[] = []; const keys = new Set<string>();
+        for (const line of masters[0].filter((value: string) => /^EXDATE[;:]/.test(value))) {
+          const prop = IcsService.property(line);
+          for (const value of prop.value.split(',')) {
+            const day = ScheduleService.key(IcsService.date({ name: prop.name, head: prop.head, value: value }).timestamp);
+            if (!ScheduleService.occursOn(task, day) || task.repeat === 'none') { throw new Error('EXDATE 不属于此系列'); }
+            if (!keys.has(day)) { exceptions.push({ taskId: task.id, dateKey: day, completed: false, skipped: true, updatedAt: now }); keys.add(day); }
+          }
+        }
+        for (const entry of entries.filter((row: string[]) => row.some((line: string) => /^RECURRENCE-ID[;:]/.test(line)))) {
+          const prop = IcsService.property(entry.find((line: string) => /^RECURRENCE-ID[;:]/.test(line)) ?? '');
+          if (/RANGE=/i.test(prop.head)) { throw new Error('RECURRENCE-ID RANGE 暂不支持'); }
+          const day = ScheduleService.key(IcsService.date(prop).timestamp);
+          if (keys.has(day) || !ScheduleService.occursOn(task, day)) { throw new Error('重复例外冲突或日期无效'); } keys.add(day);
+          if (entry.includes('STATUS:CANCELLED')) { exceptions.push({ taskId: task.id, dateKey: day, completed: false, skipped: true, updatedAt: now }); continue; }
+          const replacement = IcsService.event(entry.filter((line: string) => !/^RECURRENCE-ID[;:]/.test(line)), now);
+          task = OccurrenceService.change(task, day, OccurrenceService.draft(replacement), now);
+        }
+        tasks.push(task); occurrences.push(...exceptions);
+      } catch (error) { notes.push((entries[0].find((line: string) => line.startsWith('UID:')) ?? '事件') + '：整组未导入，' + (error as Error).message); }
+    }
+    return { document: { format: 'TaiPlanHarmony', version: 6, exportedAt: now, tasks: tasks, occurrences: occurrences }, notes: notes, total: total };
   }
+
   private static stamp(timestamp: number): string {
     return new Date(timestamp).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   }
@@ -145,7 +188,7 @@ export class IcsService {
         if ((task.startMinute ?? -1) < 0) {
           lines.push(`DTSTART;VALUE=DATE:${key.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${ScheduleService.shift(key, 1).replace(/-/g, '')}`);
         } else {
-          const end = TaskService.deadline(task, item.dueAt);
+          const end = ScheduleService.startTime(item) + (task.durationMinutes ?? 30) * 60000;
           lines.push(`DTSTART:${IcsService.stamp(end - (task.durationMinutes ?? 30) * 60000)}`, `DTEND:${IcsService.stamp(end)}`);
         }
         const steps = (task.steps ?? []).map((step: string, index: number) => `${(item.doneSteps ?? []).includes(index) ? '[x]' : '[ ]'} ${step}`).join('\n');

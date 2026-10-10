@@ -15,6 +15,7 @@ export struct CalendarWorkspace {
   onSelect: (day: string) => void = () => {};
   onView: (view: string) => void = () => {};
   onEdit: (item: TaskItem) => void = () => {};
+  onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => void = () => {};
   onCreate: (day: string, minute: number) => void = () => {};
   private dateItems(day: string): TaskItem[] {
     return ScheduleService.project(this.tasks, this.states, 'calendar', day, this.now).filter((item: TaskItem) => (item.task.startMinute ?? -1) < 0);
@@ -79,7 +80,7 @@ export struct CalendarWorkspace {
         }, (day: string) => day)
         ForEach([this.view], (view: string) => {
           TimeTable({ tasks: this.tasks, states: this.states, days: CalendarService.days(this.selected, view, this.weekStart),
-            selected: this.selected, now: this.now, onEdit: this.onEdit, onCreate: this.onCreate, onSelect: this.onSelect })
+            selected: this.selected, now: this.now, onEdit: this.onEdit, onCreate: this.onCreate, onAdjust: this.onAdjust, onSelect: this.onSelect })
         }, (view: string) => view)
       }
     }.width('100%')

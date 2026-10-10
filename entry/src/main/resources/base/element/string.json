@@ -1,1 +1,12 @@
-{ "string": [{ "name": "module_desc", "value": "TaiPlan 任务与时间规划" }] }
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "TaiPlan 任务与时间规划"
+    },
+    {
+      "name": "microphone_reason",
+      "value": "仅在你点击语音输入后录音，将语音转换为可编辑的任务草稿"
+    }
+  ]
+}

@@ -1,1 +1,2 @@
-{ "name": "entry", "version": "0.6.0-preview.1", "description": "TaiPlan task application", "dependencies": {} }
+{ "name": "entry", "version": "0.7.0-preview.1", "description": "TaiPlan task application", "dependencies": {} }
+

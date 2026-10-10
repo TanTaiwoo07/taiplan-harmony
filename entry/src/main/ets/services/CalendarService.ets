@@ -26,7 +26,7 @@ export class CalendarService {
     for (const key of [ScheduleService.shift(day, -1), day]) {
       for (const item of ScheduleService.project(tasks, states, 'calendar', key, Date.now())) {
         if ((item.task.startMinute ?? -1) < 0) { continue; }
-        const start = ScheduleService.date(key); start.setHours(0, item.task.startMinute ?? 0, 0, 0);
+        const start = ScheduleService.date(ScheduleService.key(item.dueAt)); start.setHours(0, item.task.startMinute ?? 0, 0, 0);
         const end = new Date(start.getTime() + (item.task.durationMinutes ?? 30) * 60000);
         if (start.getTime() >= finish.getTime() || end.getTime() <= begin.getTime()) { continue; }
         const startMinute = start.getTime() < begin.getTime() ? 0 : start.getHours() * 60 + start.getMinutes();

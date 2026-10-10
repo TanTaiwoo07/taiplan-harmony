@@ -1,3 +1,4 @@
+import { OccurrenceService } from './OccurrenceService';
 import { PlanningService } from './PlanningService';
 import { RecurrenceService } from './RecurrenceService';
 import { CalendarDay, OccurrenceState, Task, TaskItem, TimeConflict } from '../model/Task';
@@ -42,8 +43,10 @@ export class ScheduleService {
     }
     const state = states.get(`${task.id}@${key}`);
     if (state?.skipped) { return undefined; }
-    return { key: `${task.id}@${key}`, task: task, dateKey: key,
-      dueAt: ScheduleService.end(key), completed: state?.completed ?? false, doneSteps: (state?.doneSteps ?? []).slice() };
+    const effective = OccurrenceService.effective(task, key);
+    return { key: task.id + '@' + key, task: effective, dateKey: key,
+      dueAt: effective === task ? ScheduleService.end(key) : effective.dueAt, completed: state?.completed ?? false,
+      doneSteps: (state?.doneSteps ?? []).slice() };
   }
   static nextDate(task: Task, start: string): string { return RecurrenceService.next(task, start); }
   static project(tasks: Task[], states: OccurrenceState[], view: string, selected: string, now: number): TaskItem[] {
@@ -63,23 +66,29 @@ export class ScheduleService {
         if (view === 'inbox') { continue; }
         if (view === 'all' || view === 'scheduled') {
           let candidate = ScheduleService.nextDate(task, today);
-          while (candidate && stateIndex.get(`${task.id}@${candidate}`)?.skipped) {
+          while (candidate && (stateIndex.get(`${task.id}@${candidate}`)?.skipped || (task.overrides ?? []).some(entry => entry.originalDate === candidate && ScheduleService.key(entry.draft.dueAt) < today))) {
             candidate = ScheduleService.nextDate(task, ScheduleService.shift(candidate, 1));
           }
-          if (!candidate) { continue; }
-          const item = ScheduleService.indexedItem(task, candidate, stateIndex);
-          if (item) { items.push(item); }
+
+          const item = candidate ? ScheduleService.indexedItem(task, candidate, stateIndex) : undefined;
+          const moved = (task.overrides ?? []).map(entry => ScheduleService.indexedItem(task, entry.originalDate, stateIndex))
+            .filter((entry: TaskItem | undefined) => entry !== undefined && ScheduleService.key(entry.dueAt) >= today) as TaskItem[];
+          if (item) { moved.push(item); }
+          moved.sort((a: TaskItem, b: TaskItem) => a.dueAt - b.dueAt);
+          if (moved.length > 0) { items.push(moved[0]); }
           continue;
         }
-        const anchor = ScheduleService.key(task.dueAt);
-        const first = view === 'calendar' ? selected : view === 'future' ? ScheduleService.shift(today, 1) :
-          view === 'all' && anchor > today ? anchor : today;
-        const count = view === 'all' ? 370 : view === 'future' ? 30 : 1;
-        for (let offset = 0; offset < count; offset++) {
-          const key = ScheduleService.shift(first, offset);
+        const first = view === 'calendar' ? selected : view === 'future' ? ScheduleService.shift(today, 1) : today;
+        const count = view === 'future' ? 30 : 1;
+        const candidates = new Set<string>();
+        for (let offset = 0; offset < count; offset++) { candidates.add(ScheduleService.shift(first, offset)); }
+        for (const entry of task.overrides ?? []) { candidates.add(entry.originalDate); }
+        for (const key of candidates) {
           if (!ScheduleService.occursOn(task, key)) { continue; }
           const item = ScheduleService.indexedItem(task, key, stateIndex);
-          if (item) { items.push(item); if (view === 'all') { break; } }
+          if (!item) { continue; }
+          const actual = ScheduleService.key(item.dueAt);
+          if (actual >= first && actual < ScheduleService.shift(first, count)) { items.push(item); }
         }
       }
     }
@@ -116,10 +125,7 @@ export class ScheduleService {
     const days: CalendarDay[] = [];
     for (let i = 0; i < 42; i++) {
       const key = ScheduleService.shift(start, i);
-      let count = 0;
-      for (const task of tasks) {
-        if (ScheduleService.occursOn(task, key) && ScheduleService.indexedItem(task, key, stateIndex)) { count++; }
-      }
+      const count = ScheduleService.project(tasks, states, 'calendar', key, 0).length;
       days.push({ key: key, day: ScheduleService.date(key).getDate(), inMonth: key.slice(0, 7) === month.slice(0, 7), count: count });
     }
     return days;
@@ -142,27 +148,24 @@ export class ScheduleService {
     if ((candidate.startMinute ?? -1) < 0 || candidate.dueAt === 0 || candidate.completed) { return result; }
     const anchor = ScheduleService.key(candidate.dueAt), today = ScheduleService.key(now);
     const first = candidate.repeat === 'none' || anchor > today ? anchor : today;
-    const index = ScheduleService.indexStates(states);
     const existing = tasks.find((task: Task) => task.id === candidate.id);
     const keepHistory = existing !== undefined && existing.repeat === candidate.repeat && existing.dueAt === candidate.dueAt;
     const seen = new Set<string>();
+    const others = tasks.filter((task: Task) => task.id !== candidate.id);
     for (let day = 0; day < (candidate.repeat === 'none' ? 1 : 30); day++) {
       const key = ScheduleService.shift(first, day);
-      if (!ScheduleService.occursOn(candidate, key)) { continue; }
-      const own = ScheduleService.indexedItem(candidate, key, keepHistory ? index : new Map<string, OccurrenceState>());
-      if (!own || own.completed) { continue; }
-      const start = ScheduleService.startTime(own), end = start + (candidate.durationMinutes ?? 30) * 60000;
-      for (const task of tasks) {
-        if (task.id === candidate.id || (task.startMinute ?? -1) < 0) { continue; }
+      const ownItems = ScheduleService.project([candidate], keepHistory ? states : [], 'calendar', key, now);
+      for (const own of ownItems) {
+        if (own.completed || (own.task.startMinute ?? -1) < 0) { continue; }
+        const start = ScheduleService.startTime(own), end = start + (own.task.durationMinutes ?? 30) * 60000;
         for (const offset of [-1, 0, 1]) {
-          const otherKey = ScheduleService.shift(key, offset);
-          if (!ScheduleService.occursOn(task, otherKey)) { continue; }
-          const item = ScheduleService.indexedItem(task, otherKey, index);
-          if (!item || item.completed || seen.has(item.key)) { continue; }
-          const otherStart = ScheduleService.startTime(item);
-          if (start < otherStart + (task.durationMinutes ?? 30) * 60000 && end > otherStart) {
-            result.push({ title: task.title, dateKey: otherKey, time: TaskService.timeLabel(task) }); seen.add(item.key);
-            if (result.length === 5) { return result; }
+          for (const item of ScheduleService.project(others, states, 'calendar', ScheduleService.shift(key, offset), now)) {
+            if (item.completed || (item.task.startMinute ?? -1) < 0 || seen.has(item.key)) { continue; }
+            const otherStart = ScheduleService.startTime(item);
+            if (start < otherStart + (item.task.durationMinutes ?? 30) * 60000 && end > otherStart) {
+              result.push({ title: item.task.title, dateKey: ScheduleService.key(item.dueAt), time: TaskService.timeLabel(item.task) }); seen.add(item.key);
+              if (result.length === 5) { return result; }
+            }
           }
         }
       }

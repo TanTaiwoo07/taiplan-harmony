@@ -1,1 +1,2 @@
-{ "app": { "bundleName": "com.taiwoo.taiplan", "vendor": "TaiWoo_Chen", "versionCode": 100501, "versionName": "0.6.0-preview.1", "icon": "$media:app_icon", "label": "$string:app_name" } }
+{ "app": { "bundleName": "com.taiwoo.taiplan", "vendor": "TaiWoo_Chen", "versionCode": 100601, "versionName": "0.7.0-preview.1", "icon": "$media:app_icon", "label": "$string:app_name" } }
+

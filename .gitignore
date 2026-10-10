@@ -15,3 +15,6 @@ milestones/
 reference/
 migration/
 tests/latest-test.log
+build-0607.log
+tests/baseline-0607.log
+tests/current-0607.log

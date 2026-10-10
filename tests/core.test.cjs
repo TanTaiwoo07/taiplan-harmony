@@ -168,7 +168,7 @@ test('Weekly finite counts exclude selected weekdays before a midweek anchor', (
 test('Version 5 backups round-trip independent deadlines, events, lists, recurrence and cross-midnight time', async () => {
   const task = modern('a', '2026-10-10', 1410, 90, 'event', { repeat: 'weekly' }); task.planning.rule.weekdays = [2, 6]; task.planning.rule.count = 8;
   task.planning.listName = '学习'; task.planning.location = '教室 101';
-  const doc = Backup.decode(Backup.encode([task], [], 200)); assert.equal(doc.version, 5);
+  const doc = Backup.decode(Backup.encode([task], [], 200)); assert.equal(doc.version, 6);
   const f = repositoryFixture(); await f.repo.load(f.context); await f.repo.mergeBackup(doc);
   assert.deepEqual(plain((await f.newRepo().load(f.context))[0]), plain(task)); f.db.close();
 });
@@ -682,7 +682,7 @@ test('Version 4 backups preserve time and checklists; version 3 still imports wi
   const f = repositoryFixture(); await f.repo.load(f.context);
   const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), startMinute: 720, stepsText: '读\n写' }), 'r', 1);
   const doc = Backup.decode(Backup.encode([task], [{ ...state('r', '2026-10-10'), doneSteps: [1] }], 100));
-  assert.equal(doc.version, 5); await f.repo.mergeBackup(doc);
+  assert.equal(doc.version, 6); await f.repo.mergeBackup(doc);
   assert.equal((await f.repo.reload())[0].startMinute, 720); assert.deepEqual(plain((await f.repo.getOccurrences())[0].doneSteps), [1]);
   const old = { ...makeRepeat('weekly', '2026-10-12', 'old') };
   for (const key of ['startMinute', 'durationMinutes', 'steps', 'doneSteps']) delete old[key];
@@ -738,9 +738,9 @@ test('ICS parses escaped/folded text, floating time and Shanghai/UTC timezone co
 
 test('ICS reports each unsupported or invalid event and deduplicates UID without silently changing its meaning', () => {
   const base = ['UID:u', 'SUMMARY:任务', 'DTSTART;VALUE=DATE:20261011', 'DTEND;VALUE=DATE:20261012'];
-  const report = Ics.parse(ics([base, base, [...base, 'RRULE:FREQ=DAILY'],
+  const report = Ics.parse(ics([base, base, [...base, 'RRULE:FREQ=DAILY;BYSETPOS=1'],
     ['UID:z', 'SUMMARY:时区', 'DTSTART;TZID=Unknown/Zone:20261011T100000'],
-    ['UID:x', 'SUMMARY:跨日', 'DTSTART:20261011T233000', 'DTEND:20261012T003000'],
+    ['UID:x', 'SUMMARY:跨日', 'DTSTART:20261011T233000', 'DTEND:20261013T003000'],
     ['UID:s', 'SUMMARY:秒数', 'DTSTART:20261011T100030'], [...base, 'STATUS:CANCELLED']]), 100);
   assert.equal(report.document.tasks.length, 1); assert.equal(report.notes.length, 6);
   assert.match(report.notes.join('\n'), /UID 重复/); assert.match(report.notes.join('\n'), /RRULE/);
@@ -839,4 +839,130 @@ test('Desktop SQLite conversion works on a copied snapshot, preserves source has
     const real = fs.realpathSync(dir);
     if (path.dirname(real) === fs.realpathSync(__dirname) && path.basename(real).startsWith('.transfer-test-')) fs.rmSync(real, { recursive: true });
   }
+});
+
+const { OccurrenceService: Occ } = loadModule('services/OccurrenceService.ets');
+test('Moved occurrence retains original identity, completion and backup across days', () => {
+ const base = modern('series', '2026-10-10', 600, 60, 'task', {repeat:'daily'});
+ const replacement = Occ.draft(modern('tmp', '2026-10-12', 900, 90));replacement.title='改期';
+ const changed=Occ.change(base,'2026-10-10',replacement,200);
+ assert.equal(Calendar.project([changed],[],'calendar','2026-10-10',0).length,0);
+ const state={taskId:'series',dateKey:'2026-10-10',completed:true,skipped:false,updatedAt:210};
+ const projected=Calendar.project([changed],[state],'calendar','2026-10-12',0);
+ assert.equal(projected.length,2);const moved=projected.find(v=>v.key==='series@2026-10-10');
+ assert.equal(moved.dateKey,'2026-10-10');assert.equal(moved.completed,true);assert.equal(moved.task.title,'改期');
+ assert.equal(TimeGrid.blocks([changed],[state],'2026-10-12').find(b=>b.item.key===moved.key).start,900);
+ const decoded=Backup.decode(Backup.encode([changed],[state],300));assert.equal(decoded.tasks[0].overrides.length,1);
+ assert.equal(Calendar.project(decoded.tasks,decoded.occurrences,'calendar','2026-10-12',0).length,2);
+});
+test('Finite moved occurrence appears in all even after original series ended', () => {
+ const base=modern('finite','2026-10-10',600,30,'task',{repeat:'daily'});base.planning.rule.count=1;
+ const changed=Occ.change(base,'2026-10-10',Occ.draft(modern('tmp','2026-10-15',600)),200);
+ const rows=Calendar.project([changed],[],'all','',new Date(2026,9,12).getTime());
+ assert.equal(rows.length,1);assert.equal(rows[0].key,'finite@2026-10-10');
+});
+test('Override validates original occurrence, excludes skipped moved instances, and persists in SQLite', async () => {
+ const f=repositoryFixture();await f.repo.load(f.context);const base=modern('series','2026-10-10',600,30,'task',{repeat:'weekly'});
+ assert.throws(()=>Occ.change(base,'2026-10-11',Occ.draft(modern('tmp','2026-10-12')),200));
+ const changed=Occ.change(base,'2026-10-10',Occ.draft(modern('tmp','2026-10-12')),200);
+ await f.repo.save(changed);const reloaded=(await f.repo.reload())[0];assert.deepEqual(plain(reloaded.overrides),plain(changed.overrides));
+ assert.equal(Calendar.project([reloaded],[{taskId:'series',dateKey:'2026-10-10',completed:false,skipped:true,updatedAt:300}],'calendar','2026-10-12',0).length,0);
+ await f.repo.remove('series');assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM occurrence_overrides').get().n,0);
+});
+
+
+const { DraftService: Drafts } = loadModule('services/DraftService.ets');
+const { ReminderPlanService: Reminders } = loadModule('services/ReminderPlanService.ets');
+const { AutoPlanService: AutoPlan } = loadModule('services/AutoPlanService.ets');
+test('Chinese offline multi-drafts preserve uncertain words and explicit modern dates',()=>{
+ const rows=Drafts.local('明天下午三点讨论项目，一个小时；有空整理照片',new Date(2026,9,10,8).getTime());
+ assert.equal(rows.length,2);assert.equal(rows[0].draft.startMinute,900);assert.equal(rows[0].draft.durationMinutes,60);
+ assert.equal(rows[0].draft.planning.deadlineMode,'none');assert.equal(rows[1].draft.dueAt,0);assert.match(rows[1].draft.title,/有空/);
+ assert.throws(()=>Drafts.local('今天二十五点开会',Date.now()));assert.throws(()=>Drafts.local('今天19:80开会',Date.now()));
+});
+test('AI schema rejects invalid time, date, action-only text, excessive items, and preserves explanations',()=>{
+ const row={title:'讨论',date:'2026-10-11',time:'15:00',duration:60,priority:1,location:'图书馆',note:'',explanation:'请确认'};
+ const raw=JSON.stringify({drafts:[row]});const valid=Drafts.decode(raw,100)[0];assert.equal(valid.draft.planning.location,'图书馆');assert.equal(valid.explanation,'请确认');
+ for(const change of [{time:'25:00'},{date:'2026-02-30'},{duration:-1},{priority:9},{title:''},{date:'',time:'09:00'},{location:123}])assert.throws(()=>Drafts.decode(JSON.stringify({drafts:[{...row,...change}]}),100));
+ assert.throws(()=>Drafts.decode('delete all tasks',100));assert.throws(()=>Drafts.decode(JSON.stringify({drafts:Array(21).fill(row)}),100));
+});
+test('Reminder intents follow moved identity, skip/completion and seven-day horizon',()=>{
+ const now=new Date(2026,9,10,8).getTime();const t=modern('remind','2026-10-10',600,30,'task',{repeat:'daily'});
+ t.planning.reminder={mode:'start',leadMinutes:10,at:0};
+ const changed=Occ.change(t,'2026-10-10',Occ.draft(modern('tmp','2026-10-11',660)),now);changed.overrides[0].draft.planning.reminder=t.planning.reminder;
+ const intents=Reminders.intents([changed],[],now);const moved=intents.find(i=>i.key==='remind@2026-10-10');
+ assert.equal(moved.at,new Date(2026,9,11,10,50).getTime());assert.ok(intents.length<=7);
+ assert.equal(Reminders.intents([changed],[state('remind','2026-10-10')],now).some(i=>i.key===moved.key),false);
+ assert.equal(Reminders.intents([changed],[state('remind','2026-10-10',false,true)],now).some(i=>i.key===moved.key),false);
+});
+test('Date reminders default to nine and no rule never schedules a reminder',()=>{
+ const t=modern('date','2026-10-11');const now=new Date(2026,9,10,8).getTime();assert.equal(Reminders.intents([t],[],now).length,0);
+ t.planning.reminder={mode:'start',leadMinutes:0,at:0};assert.equal(Reminders.intents([t],[],now)[0].at,new Date(2026,9,11,9).getTime());
+ assert.throws(()=>modern('bad','',-1,30,'task',{planning:{...Plan.create(0,-1,30),reminder:{mode:'start',leadMinutes:10,at:0}}}));
+});
+test('Planning does not move fixed events or overwrite priority/deadline, and reports insufficient capacity',()=>{
+ const fixed=modern('fixed','2026-10-10',540,120,'event');const high=modern('high','',-1,60,'task',{priority:2});
+ const low=modern('low','',-1,60,'task',{priority:0});const expired=modern('late','',-1,60);expired.planning.deadlineMode='datetime';expired.planning.deadlineAt=new Date(2026,9,10,7).getTime();
+ const before=plain([fixed,high,low,expired]);const report=AutoPlan.suggest([fixed,high,low,expired],[],new Date(2026,9,10,8).getTime());
+ assert.equal(report.suggestions[0].after.id,'high');assert.equal(report.suggestions[0].after.startMinute,660);assert.equal(report.suggestions[1].after.startMinute,720);assert.equal(report.unscheduled.length,1);
+ assert.deepEqual(plain([fixed,high,low,expired]),before);assert.ok(report.suggestions.every(v=>v.after.id!=='fixed'));
+});
+test('Future split is transactional and preserves past progress; future progress blocks splitting',async()=>{
+ const f=repositoryFixture();await f.repo.load(f.context);const t=modern('series','2026-10-10',600,30,'task',{repeat:'daily'});t.planning.rule.count=5;await f.repo.save(t);await f.repo.setOccurrence(state('series','2026-10-10'));
+ const edited=S.edit(t,Occ.draft(modern('new','2026-10-12',900,30,'task',{repeat:'daily'})),200);edited.planning.rule.count=5;
+ f.fail('INTO task_tags');await assert.rejects(()=>f.repo.splitSeries('series','2026-10-12',edited,'new'));assert.equal((await f.repo.reload()).length,1);f.fail('');
+ await f.repo.splitSeries('series','2026-10-12',edited,'new');const rows=await f.repo.reload();assert.equal(rows.length,2);assert.equal(rows.find(v=>v.id==='new').planning.rule.count,3);
+ assert.equal(Calendar.project(rows,await f.repo.getOccurrences(),'calendar','2026-10-12',0).length,1);
+ Backup.decode(Backup.encode(rows,await f.repo.getOccurrences(),300));f.db.close();
+});
+test('Recurring ICS weekly classes support exclusions and moved occurrence overrides atomically',()=>{
+ const raw=ics([['UID:course','SUMMARY:课程','DTSTART:20261012T090000','DTEND:20261012T100000','RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6','EXDATE:20261014T090000'],
+ ['UID:course','RECURRENCE-ID:20261019T090000','SUMMARY:调课','DTSTART:20261020T140000','DTEND:20261020T150000']]);
+ const report=Ics.parse(raw,100);assert.equal(report.notes.length,0);assert.equal(report.document.tasks.length,1);Backup.decode(JSON.stringify(report.document));
+ assert.equal(Calendar.project(report.document.tasks,report.document.occurrences,'calendar','2026-10-14',0).length,0);
+ assert.equal(Calendar.project(report.document.tasks,report.document.occurrences,'calendar','2026-10-19',0).length,0);
+ assert.equal(Calendar.project(report.document.tasks,report.document.occurrences,'calendar','2026-10-20',0)[0].task.title,'调课');
+});
+test('ICS snapshot uses planned time instead of absent modern deadline',()=>{
+ const now=new Date(2026,9,10,8).getTime();const t=modern('planned','2026-10-10',600,60);
+ const roundtrip=Ics.parse(Ics.exportMonth([t],[],now),now);assert.equal(roundtrip.notes.length,0);assert.equal(roundtrip.document.tasks[0].startMinute,600);
+});
+
+test('Reminder adapter reconciles native ids, gives unique notification ids and never duplicates on retry',async()=>{
+ const values=new Map([['enabled',true]]);let valid=[],next=1,published=0,cancelled=[];
+ const adapter={ReminderType:{REMINDER_TYPE_CALENDAR:1},ActionButtonType:{ACTION_BUTTON_TYPE_CLOSE:0},getAllValidReminders:async()=>valid,
+ publishReminder:async req=>{published++;const reminderId=next++;valid.push({reminderId,reminderReq:req});return reminderId;},
+ cancelReminder:async id=>{cancelled.push(id);valid=valid.filter(v=>v.reminderId!==id);}};
+ const external={'@kit.BackgroundTasksKit':{reminderAgentManager:adapter},'@kit.NotificationKit':{notificationManager:{SlotType:{SERVICE_INFORMATION:2}}},
+ '@kit.ArkData':{preferences:{getPreferences:async()=>({get:async(k,d)=>values.has(k)?values.get(k):d,put:async(k,v)=>values.set(k,v),flush:async()=>{}})}}};
+ const {ReminderService: Native}=loadModule('platform/ReminderService.ets',external);const service=new Native();
+ const tomorrow=Calendar.shift(Calendar.key(Date.now()),1);const a=modern('r1',tomorrow,600),b=modern('r2',tomorrow,660);
+ for(const t of [a,b])t.planning.reminder={mode:'start',leadMinutes:10,at:0};
+ assert.match(await service.sync({},[a,b],[]),/已登记 2/);assert.equal(published,2);assert.notEqual(valid[0].reminderReq.notificationId,valid[1].reminderReq.notificationId);
+ await service.sync({},[a,b],[]);assert.equal(published,2);
+ await service.sync({},[b],[]);assert.equal(valid.length,1);assert.equal(cancelled.length,1);
+ await service.disable({});assert.equal(valid.length,0);assert.equal(values.get('enabled'),false);
+});
+test('Reminder registration failure remains failed in durable journal and does not roll back task data',async()=>{
+ const values=new Map([['enabled',true]]);const adapter={ReminderType:{REMINDER_TYPE_CALENDAR:1},ActionButtonType:{ACTION_BUTTON_TYPE_CLOSE:0},getAllValidReminders:async()=>[],publishReminder:async()=>{throw {code:1700002};}};
+ const {ReminderService: Native}=loadModule('platform/ReminderService.ets',{'@kit.BackgroundTasksKit':{reminderAgentManager:adapter},'@kit.NotificationKit':{notificationManager:{SlotType:{SERVICE_INFORMATION:2}}},
+ '@kit.ArkData':{preferences:{getPreferences:async()=>({get:async(k,d)=>values.has(k)?values.get(k):d,put:async(k,v)=>values.set(k,v),flush:async()=>{}})}}});
+ const t=modern('r',Calendar.shift(Calendar.key(Date.now()),1),600);t.planning.reminder={mode:'start',leadMinutes:0,at:0};const before=plain(t);
+ const result=await new Native().sync({},[t],[]);assert.match(result,/失败 1/);assert.match(result,/1700002/);assert.equal(JSON.parse(values.get('journal'))[0].state,'failed:1700002');assert.deepEqual(plain(t),before);
+});
+test('Conflicts see moved occurrences on actual day and no longer see the old slot',()=>{
+ const base=modern('series','2026-10-10',600,60,'task',{repeat:'weekly'});const changed=Occ.change(base,'2026-10-10',Occ.draft(modern('tmp','2026-10-12',900,60)),200);
+ assert.equal(Calendar.conflicts(modern('c','2026-10-10',600,30),[changed],[],0).length,0);
+ assert.equal(Calendar.conflicts(modern('c','2026-10-12',900,30),[changed],[],0).length,1);
+});
+test('Future split refuses future progress and never partially changes the source',async()=>{
+ const f=repositoryFixture();await f.repo.load(f.context);const task=modern('series','2026-10-10',600,30,'task',{repeat:'daily'});await f.repo.save(task);await f.repo.setOccurrence(state('series','2026-10-13'));
+ await assert.rejects(()=>f.repo.splitSeries(task.id,'2026-10-12',task,'new'));assert.equal((await f.repo.reload()).length,1);assert.equal((await f.repo.getOccurrences()).length,1);f.db.close();
+});
+
+test('Single-instance checklist edits clear only its progress, later title edits retain new progress',async()=>{
+ const f=repositoryFixture();await f.repo.load(f.context);const task=modern('steps','2026-10-10',600,30,'task',{repeat:'daily',stepsText:'原步骤'});await f.repo.save(task);await f.repo.setOccurrence({...state('steps','2026-10-10'),doneSteps:[0]});await f.repo.setOccurrence({...state('steps','2026-10-11'),doneSteps:[0]});
+ const draft=Occ.draft(modern('tmp','2026-10-10',600,30,'task',{stepsText:'新步骤\n第二步'}));const changed=Occ.change(task,'2026-10-10',draft,300);await f.repo.save(changed);
+ let states=await f.repo.getOccurrences();assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-10').doneSteps),[]);assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-11').doneSteps),[0]);
+ await f.repo.setOccurrence({...state('steps','2026-10-10'),updatedAt:350,doneSteps:[1]});draft.title='仅改标题';await f.repo.save(Occ.change(changed,'2026-10-10',draft,400));states=await f.repo.getOccurrences();assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-10').doneSteps),[1]);f.db.close();
 });

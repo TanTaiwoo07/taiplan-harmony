@@ -1,5 +1,29 @@
 # TaiPlan 鸿蒙版开发进度
 
+## 最新联合开发状态：0.7.0-preview.1
+
+用户明确要求 0.6、0.7 一起开发；现在允许系统能力适配与 P1 剩余工作交错推进，正式验收仍分别执行。下面旧 0.6 表及日志是上一检查点记录，本节优先。当前分支 feature/0.6-0.7-integrated，父提交 015189ac90ce19d6c9538ad5dced827f1f46602d。main 仍保留 0.5.0。
+
+| 工作包 | 当前新增证据 | 状态 |
+| --- | --- | --- |
+| P1 02/06 | 稳定原日期身份、例外表、单次修改、受保护的此后拆分；备份6兼容3/4/5 | in_progress |
+| P1 07/08 | 拖动/缩放代码、确认/撤销；模拟器缩放及撤销通过，跨列拖动未全验 | in_progress |
+| P1 09 | 常见RRULE、EXDATE、RECURRENCE-ID；来源更新和RDATE未完成 | in_progress |
+| P1 11 | 98项回归、API26构建/覆盖安装；原目录91文件、设备7张原表保持一致 | in_progress |
+| P2 01/02 | 真实语音/录音/权限适配，原生拒绝授权回退通过，真机中文未验 | implemented_unverified |
+| P2 03 | 提醒意图、登记/取消/对账/失败journal；模拟器发布1700002 | blocked：系统登记受限，业务与替身测试通过 |
+| P2 04/05 | HTTPS AI、AssetStore密钥、多条草稿、程序校验、事务保存；缺真实AI凭据 | implemented_unverified |
+| P2 06 | 本地确定性辅助排程、冲突/截止保护、快照校验与撤销；云端AI排程未接 | in_progress |
+| P2 07 | 部分失败路径实测；未完成真实语音→AI→后台提醒全链路 | planned |
+
+本轮详细实现、限制、证据和下一位执行者步骤：INTEGRATED-0607.md。测试专用任务已删除；后台提醒功能开关在测试结束时关闭。源码归档和安装包见本地 milestones/v0.7.0-preview.1/MANIFEST.json，不把版本号当作验收完成声明。
+
+后续先做可登记设备的系统能力验收及真实AI接入，再补复杂重复、ICS来源、分类/设置、拖动和性能/无障碍；继续保留历史保护条件。无需改动原始保护目录。
+
+---
+以下为 0.6.0-preview.1 历史台账。
+
+
 本台账配合 DEVELOPMENT_PLAN.md 使用。更新时间为 2026 年 10 月 10 日；已开始第一阶段，形成 0.6.0-preview.1 可运行检查点；完整第一阶段尚未完成。
 
 ## 当前状态
@@ -126,3 +150,4 @@ planned 是尚未执行；in_progress 是正在开发；implemented_unverified �
 - 证据：milestones/device-data-verification.json、phase1-keyboard-fixed.png、phase1-overlap.png、phase1-dark-settings.png，源/设备基线在 milestones/v0.5.0-before-phase1。
 - 未完成：例外与编辑范围、时间块拖动/缩放、重复课表 ICS、完整设置/分类管理、全量页面拆分、跨时区/DST/真机/性能验收；不推进第二阶段。
 - 需要用户决定：当前继续第一阶段无额外必需决定。
+

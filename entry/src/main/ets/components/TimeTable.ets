@@ -12,6 +12,7 @@ export struct TimeTable {
   @State private verticalOffset: number = 420;
   @Prop now: number = Date.now();
   onEdit: (item: TaskItem) => void = () => {};
+  onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => void = () => {};
   onCreate: (day: string, minute: number) => void = () => {};
   onSelect: (day: string) => void = () => {};
   private scroller: Scroller = new Scroller();
@@ -25,7 +26,7 @@ export struct TimeTable {
   }, 150); }
   build() {
     Column({ space: 8 }) {
-      Text(this.days.length > 1 ? '左右滑动查看整周 · 点日期切换无时间事项' : '长按空白时间格添加 · 点时间块查看详情').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Text(this.days.length > 1 ? '左右滑动查看整周 · 点日期切换无时间事项' : '长按区块拖动 · 拖底部调整时长 · 长按空白添加').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Stack({ alignContent: Alignment.TopStart }) {
       Scroll(this.horizontal) {
         Column({ space: 0 }) {
@@ -56,18 +57,31 @@ export struct TimeTable {
                   }
                   ForEach(this.blocks(day), (block: CalendarBlock) => {
                     Column({ space: 3 }) {
-                      Text(block.item.task.title).fontSize(12).fontWeight(FontWeight.Medium).maxLines(2)
+                      Text(block.item.task.title).fontSize(12).fontWeight(FontWeight.Medium).maxLines(block.end - block.start >= 70 ? 2 : 1)
                         .fontColor($r('app.color.text_primary')).width('100%')
-                      if (block.end - block.start >= 45) {
+                      if (block.end - block.start >= 70) {
                         Text((block.continuesBefore ? '续 · ' : '') + TaskService.timeLabel(block.item.task))
                           .fontSize(10).fontColor($r('app.color.text_secondary')).width('100%')
                       }
+                      if (block.end - block.start >= 30) {
+                      Text('━').fontSize(10).width('100%').height(18).fontColor($r('app.color.text_secondary'))
+                        .position({ x: 0, y: Math.max(0, block.end - block.start - 22) })
+                        .accessibilityText('拖动调整时长')
+                        .gesture(PanGesture({ direction: PanDirection.Vertical }).onActionEnd((event: GestureEvent) => {
+                          this.onAdjust(block.item, 0, Math.round(event.offsetY / 15) * 15, true);
+                        }))
+                      }
                     }.padding(5).width((this.columnWidth() - 6) / block.lanes - 2).height(Math.max(18, block.end - block.start - 2))
-                      .borderRadius(8).backgroundColor($r('app.color.chip_background'))
+                      .borderRadius(8).clip(true).backgroundColor($r('app.color.chip_background'))
                       .opacity(block.item.completed ? 0.55 : 1)
                       .position({ x: 3 + block.lane * (this.columnWidth() - 6) / block.lanes, y: block.start })
                       .accessibilityText(block.item.task.title + ' ' + TaskService.timeLabel(block.item.task))
                       .onClick(() => this.onEdit(block.item))
+                      .gesture(GestureGroup(GestureMode.Sequence, LongPressGesture({ duration: 500 }),
+                        PanGesture().onActionEnd((event: GestureEvent) => {
+                          this.onAdjust(block.item, this.days.length > 1 ? Math.round(event.offsetX / this.columnWidth()) : 0,
+                            Math.round(event.offsetY / 15) * 15, false);
+                        })))
                   }, (block: CalendarBlock) => JSON.stringify(block))
                   if (day === ScheduleService.key(this.now)) {
                     Row().height(1).width(this.columnWidth()).backgroundColor($r('app.color.danger'))

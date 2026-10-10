@@ -47,6 +47,10 @@ export class PlanningService {
     if (!Number.isSafeInteger(plan.deadlineAt) || plan.deadlineAt < 0 || plan.deadlineAt > 4133980799999 ||
       (plan.deadlineMode === 'none' ? plan.deadlineAt !== 0 : plan.deadlineAt === 0)) { throw new Error('截止期限无效'); }
     if (plan.deadlineMode === 'date') { const d = new Date(plan.deadlineAt); if (d.getHours() !== 23 || d.getMinutes() !== 59 || d.getSeconds() !== 59 || d.getMilliseconds() !== 999) { throw new Error('按日期截止需使用当天结束'); } }
+    const reminder = plan.reminder;
+    if (reminder && (!['none', 'start', 'deadline', 'absolute'].includes(reminder.mode) || !Number.isInteger(reminder.leadMinutes) || reminder.leadMinutes < 0 || reminder.leadMinutes > 10080 || !Number.isSafeInteger(reminder.at) || reminder.at < 0 || reminder.at > 4133980799999 ||
+      (reminder.mode === 'start' && day === 0) || (reminder.mode === 'deadline' && plan.deadlineMode === 'none') ||
+      (reminder.mode === 'absolute' && (reminder.at === 0 || repeat !== 'none')))) { throw new Error('提醒需要有效的安排或截止，独立时刻提醒仅用于单次任务'); }
     const rule = plan.rule;
     if (!rule || !Number.isInteger(rule.interval) || rule.interval < 1 || rule.interval > 366 ||
       !Array.isArray(rule.weekdays) || rule.weekdays.some((day: number) => !Number.isInteger(day) || day < 1 || day > 7) ||

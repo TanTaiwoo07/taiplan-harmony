@@ -1,10 +1,11 @@
+import { OccurrenceService } from './OccurrenceService';
 import { BackupDocument, OccurrenceState, Task } from '../model/Task';
 import { TaskService } from './TaskService';
 import { ScheduleService } from './ScheduleService';
 
 export class BackupService {
   static encode(tasks: Task[], occurrences: OccurrenceState[], now: number): string {
-    const doc: BackupDocument = { format: 'TaiPlanHarmony', version: 5, exportedAt: now, tasks: tasks, occurrences: occurrences };
+    const doc: BackupDocument = { format: 'TaiPlanHarmony', version: 6, exportedAt: now, tasks: tasks, occurrences: occurrences };
     const raw = JSON.stringify(doc, null, 2);
     BackupService.decode(raw);
     return raw;
@@ -12,7 +13,7 @@ export class BackupService {
   static decode(raw: string): BackupDocument {
     if (raw.length > 4 * 1024 * 1024) { throw new Error('备份超过 4 MB，请选择较小的文件'); }
     const doc = JSON.parse(raw) as BackupDocument;
-    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4, 5].includes(doc.version) || !Array.isArray(doc.tasks) ||
+    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4, 5, 6].includes(doc.version) || !Array.isArray(doc.tasks) ||
       !Array.isArray(doc.occurrences) || doc.tasks.length > 5000 || doc.occurrences.length > 50000) { throw new Error('不是受支持的 TaiPlan 备份'); }
     const ids = new Set<string>();
     const byId = new Map<string, Task>();
@@ -36,6 +37,7 @@ export class BackupService {
       TaskService.validateDone(task.doneSteps ?? [], (task.steps ?? []).length);
       if (task.repeat !== 'none' && (task.doneSteps ?? []).length > 0) { throw new Error('重复任务的子任务进度必须按日期保存'); }
       if (clean.tags.length !== task.tags.length || (task.repeat !== 'none' && task.completed)) { throw new Error('备份中的重复任务或标签无效'); }
+      OccurrenceService.validate(task);
       ids.add(task.id);
       byId.set(task.id, task);
     }
@@ -50,7 +52,7 @@ export class BackupService {
       const key = `${state.taskId}@${state.dateKey}`;
       if (!task || task.repeat === 'none' || !ScheduleService.occursOn(task, state.dateKey) || stateKeys.has(key)) { throw new Error('备份中的重复日期无效'); }
       if (state.doneSteps !== undefined && !Array.isArray(state.doneSteps)) { throw new Error('备份中的子任务进度无效'); }
-      TaskService.validateDone(state.doneSteps ?? [], (task.steps ?? []).length);
+      TaskService.validateDone(state.doneSteps ?? [], (OccurrenceService.effective(task, state.dateKey).steps ?? []).length);
       stateKeys.add(key);
     }
     return doc;

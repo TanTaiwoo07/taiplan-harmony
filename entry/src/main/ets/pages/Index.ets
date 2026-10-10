@@ -1,3 +1,7 @@
+import { AutoPlanService, PlanReport, PlanSuggestion } from '../services/AutoPlanService';
+import { ReminderService } from '../platform/ReminderService';
+import { SmartEntry } from '../components/SmartEntry';
+import { OccurrenceService } from '../services/OccurrenceService';
 import { PlanningService } from '../services/PlanningService';
 import { MaterialService } from '../services/MaterialService';
 import { CalendarService } from '../services/CalendarService';
@@ -20,6 +24,7 @@ import { MonthCalendar } from '../components/MonthCalendar';
 @Entry
 @Component
 struct Index {
+  @StorageLink('taiplanReminderTarget') @Watch('followReminder') private reminderTarget: string = '';
   @State private tasks: Task[] = [];
   @State private states: OccurrenceState[] = [];
   @State private ready: boolean = false;
@@ -49,6 +54,8 @@ struct Index {
   @State private draftCount: string = '';
   @State private advanced: boolean = false;
   @State private editingId: string = '';
+  @State private occurrenceDate: string = '';
+  @State private editScope: string = 'all';
   @State private draftTitle: string = '';
   @State private draftNote: string = '';
   @State private draftPriority: number = 1;
@@ -74,9 +81,20 @@ struct Index {
   @State private importNotes: string = '';
   private pendingImport: BackupDocument | undefined = undefined;
   private deletedBackup: BackupDocument | undefined = undefined;
+  private reminders: ReminderService = new ReminderService();
+  @State private reminderStatus: string = '系统提醒未启用';
+  @State private draftReminder: string = 'none';
+  @State private draftLead: number = 10;
   private repository: TaskRepository = new TaskRepository();
   private scroller: Scroller = new Scroller();
   private clockId: number = -1;
+  private calendarUndo: Task | undefined = undefined;
+  private calendarUndoRevision: number = 0;
+  @State private calendarUndoLabel: string = '';
+  @State private planReport: PlanReport = { suggestions: [], unscheduled: [] };
+  private planSnapshot: string = '';
+  private planUndo: Task[] = [];
+  @State private hasPlanUndo: boolean = false;
   private editorInitial: string = '';
 
   aboutToAppear(): void {
@@ -92,6 +110,7 @@ struct Index {
     const old = this.tasks.find((task: Task) => task.id === this.editingId);
     plan.legacyTimeSemantics = old?.planning?.legacyTimeSemantics ?? false;
     plan.sourceType = old?.planning?.sourceType ?? 'manual';
+    plan.reminder = { mode: this.draftReminder, leadMinutes: this.draftLead, at: 0 };
     plan.location = this.draftLocation.trim(); plan.listName = this.draftList.trim();
     plan.deadlineMode = this.draftDeadlineMode; plan.deadlineAt = this.draftDeadline;
     plan.rule = this.draftRepeat === 'none' ? PlanningService.emptyRule() : {
@@ -101,7 +120,7 @@ struct Index {
   private editorFingerprint(): string {
     return JSON.stringify([this.draftTitle, this.draftNote, this.draftPriority.toString(), this.draftTags,
       this.draftDueAt.toString(), this.draftStart.toString(), this.draftDuration, this.draftKind, this.draftLocation,
-      this.draftList, this.draftDeadline.toString(), this.draftDeadlineMode, this.draftRepeat, this.draftInterval,
+      this.draftList, this.draftReminder, this.draftLead.toString(), this.draftDeadline.toString(), this.draftDeadlineMode, this.draftRepeat, this.draftInterval,
       this.draftWeekdays.join(','), this.draftUntil, this.draftCount, this.draftSteps]);
   }
   private closeSubpage(): void {
@@ -221,13 +240,31 @@ struct Index {
       this.selectedTab = this.preferences.startPage; this.calendarView = this.preferences.calendarView;
       this.showTaskDone = this.preferences.showCompleted;
       this.ready = true;
+      this.followReminder();
+      this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states);
     } catch { this.error = '读取或迁移失败，请重试。已有数据仍保留。'; }
     finally { this.busy = false; }
   }
   private async refreshData(): Promise<void> {
     this.tasks = await this.repository.reload();
     this.states = await this.repository.getOccurrences();
+    this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states);
     if (this.tagFilter.length > 0 && !TaskService.allTags(this.tasks).includes(this.tagFilter)) { this.tagFilter = ''; }
+  }
+  private followReminder(): void {
+    if (!this.ready || !this.reminderTarget) { return; }
+    try {
+      const target = JSON.parse(this.reminderTarget) as string[]; this.reminderTarget = '';
+      const task = this.tasks.find((entry: Task) => entry.id === target[0]);
+      if (!task) { this.notice = '提醒对应的事项已删除'; return; }
+      if (task.repeat !== 'none' && ScheduleService.validKey(target[1])) {
+        if (!ScheduleService.occursOn(task, target[1])) { this.notice = '此提醒的原始发生项已失效'; return; }
+        const item = ScheduleService.item(task, target[1], this.states);
+        if (!item) { this.notice = '这一次事项已跳过'; return; }
+        this.selectedDay = ScheduleService.key(item.dueAt); this.selectedTab = 2; this.calendarView = 'day'; this.changeMode('list');
+        this.notice = '提醒事项：' + item.task.title;
+      } else { this.openEditor(task); }
+    } catch { this.reminderTarget = ''; this.notice = '无法定位此提醒，请在搜索中查找'; }
   }
   private changeMode(mode: string): void {
     this.mode = mode; this.error = ''; this.notice = '';
@@ -238,6 +275,7 @@ struct Index {
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
   }
   private openEditor(task?: Task): void {
+    this.occurrenceDate = ''; this.editScope = 'all';
     this.editingId = task ? task.id : '';
     this.draftTitle = task ? task.title : '';
     this.draftNote = task ? task.note : '';
@@ -249,6 +287,7 @@ struct Index {
     this.draftDuration = (task?.durationMinutes ?? 30).toString();
     this.draftSteps = (task?.steps ?? []).join('\n');
     const plan = task ? PlanningService.forTask(task) : PlanningService.create(0, -1, 30);
+    this.draftReminder = plan.reminder?.mode ?? 'none'; this.draftLead = plan.reminder?.leadMinutes ?? 10;
     this.draftKind = plan.kind; this.draftLocation = plan.location; this.draftList = plan.listName;
     this.draftDeadline = plan.deadlineAt; this.draftDeadlineMode = plan.deadlineMode;
     this.draftInterval = plan.rule.interval.toString(); this.draftWeekdays = plan.rule.weekdays.slice();
@@ -256,6 +295,102 @@ struct Index {
     this.advanced = task !== undefined;
     this.editorInitial = this.editorFingerprint();
     this.changeMode('editor');
+  }
+  private adjustCalendar(item: TaskItem, days: number, minutes: number, resize: boolean): void {
+    if (this.busy || (days === 0 && minutes === 0)) { return; }
+    const original = this.tasks.find((task: Task) => task.id === item.task.id); if (!original) { return; }
+    const draft = OccurrenceService.draft(item.task); draft.dueAt = item.dueAt;
+    const date = ScheduleService.date(ScheduleService.key(item.dueAt));
+    if (resize) { draft.durationMinutes = Math.max(5, Math.min(1440, (draft.durationMinutes ?? 30) + minutes)); }
+    else { date.setDate(date.getDate() + days); date.setHours(0, (draft.startMinute ?? 0) + minutes, 0, 0);
+      draft.dueAt = ScheduleService.end(ScheduleService.key(date.getTime())); draft.startMinute = date.getHours() * 60 + date.getMinutes(); }
+    const plan = PlanningService.create(draft.dueAt, draft.startMinute ?? 0, draft.durationMinutes ?? 30, draft.planning?.kind ?? 'task');
+    if (draft.planning) { plan.location = draft.planning.location; plan.listName = draft.planning.listName; plan.deadlineMode = draft.planning.deadlineMode; plan.deadlineAt = draft.planning.deadlineAt; plan.reminder = draft.planning.reminder; }
+    draft.planning = plan; draft.repeat = 'none';
+    try {
+      const next = original.repeat === 'none' ? TaskService.edit(original, draft, Date.now()) : OccurrenceService.change(original, item.dateKey, draft, Date.now());
+      const collision = ScheduleService.conflicts(TaskService.create(draft, original.id, Date.now()), this.tasks, this.states, Date.now());
+      this.getUIContext().showAlertDialog({ title: resize ? '调整时长？' : '调整安排？',
+        message: draft.title + '\n' + TaskService.dateLabel(draft.dueAt) + ' ' + TaskService.timeLabel(TaskService.create(draft, 'preview', 0)) +
+          (original.repeat !== 'none' ? '\n只修改这一次。' : '') + (collision.length ? '\n注意：与其他安排重叠。' : ''),
+        primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '确认', action: () => this.saveCalendarAdjustment(original, next) } });
+    } catch (error) { this.error = (error as Error).message; }
+  }
+  private async saveCalendarAdjustment(original: Task, next: Task): Promise<void> {
+    if (this.busy) { return; } this.busy = true;
+    try { const live = (await this.repository.reload()).find((task: Task) => task.id === original.id);
+      if (!live || live.updatedAt !== original.updatedAt) { throw new Error('任务已变化，请重新调整'); }
+      await this.repository.save(next); this.calendarUndo = original; this.calendarUndoRevision = next.updatedAt;
+      this.calendarUndoLabel = original.title; await this.refreshData();
+    } catch (error) { this.error = (error as Error).message; } finally { this.busy = false; }
+  }
+  private async undoCalendarAdjustment(): Promise<void> {
+    if (this.busy || !this.calendarUndo) { return; } this.busy = true;
+    try { const live = (await this.repository.reload()).find((task: Task) => task.id === this.calendarUndo?.id);
+      if (!live || live.updatedAt !== this.calendarUndoRevision) { throw new Error('任务已有后续修改，不能覆盖撤销'); }
+      await this.repository.save(this.calendarUndo); this.calendarUndo = undefined; this.calendarUndoLabel = ''; await this.refreshData();
+    } catch (error) { this.error = (error as Error).message; } finally { this.busy = false; }
+  }
+  private openOccurrence(item: TaskItem): void {
+    if (item.task.repeat === 'none') { this.openEditor(item.task); return; }
+    const original = this.tasks.find((task: Task) => task.id === item.task.id);
+    if (!original) { return; }
+    this.getUIContext().showAlertDialog({ title: '修改重复日程', message: item.task.title + '\n原始日期：' + item.dateKey,
+      buttons: [
+        { value: '仅这一次', action: () => { this.openEditor(item.task); this.occurrenceDate = item.dateKey; this.editScope = 'one';
+          this.draftDueAt = item.dueAt; this.draftRepeat = 'none'; this.draftCount = ''; this.draftUntil = ''; this.draftWeekdays = []; this.draftInterval = '1';
+          this.notice = '只影响原始日期 ' + item.dateKey + '，完成记录保持关联。'; this.editorInitial = this.editorFingerprint(); } },
+        { value: '这次及以后', action: () => { this.openEditor(original); this.occurrenceDate = item.dateKey; this.editScope = 'future';
+          this.draftDueAt = item.dueAt; this.notice = '拆分新系列；如果未来已有进度或单次调整，将停止保存以保护记录。'; this.editorInitial = this.editorFingerprint(); } },
+        { value: '整个系列', action: () => { this.openEditor(original); this.notice = '已有单次例外保留独立内容。'; } }
+      ] });
+  }
+  private proposePlan(): void {
+    this.hasPlanUndo = false; this.planUndo = [];
+    this.planReport = AutoPlanService.suggest(this.tasks, this.states, Date.now());
+    this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.changeMode('plan');
+  }
+  private async applyPlan(undo: boolean): Promise<void> {
+    if (this.busy) { return; } this.busy = true;
+    try {
+      const current = await this.repository.reload(), states = await this.repository.getOccurrences();
+      if (JSON.stringify([current, states]) !== this.planSnapshot) { throw new Error('数据已变化，请重新生成建议'); }
+      const replacement = undo ? this.planUndo : this.planReport.suggestions.map(item => item.after);
+      await this.repository.saveBatch(replacement);
+      this.planUndo = undo ? [] : this.planReport.suggestions.map(item => item.before); this.hasPlanUndo = !undo;
+      await this.refreshData(); this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.planReport = { suggestions: [], unscheduled: [] };
+      this.notice = undo ? '已撤销本次排程' : '已采用，原有日历事件未移动';
+    } catch (error) { this.error = (error as Error).message; } finally { this.busy = false; }
+  }
+  @Builder
+  planPage() {
+    Text('本地辅助排程').fontSize(20).fontColor($r('app.color.text_primary'))
+    Text('仅安排收集箱任务，未来 7 天 09:00–21:00，15 分钟网格；保留已有事件。默认时长 30 分钟，可先编辑任务时长。建议尚未保存。').fontSize(13).fontColor($r('app.color.text_secondary'))
+    ForEach(this.planReport.suggestions, (item: PlanSuggestion) => {
+      Column({ space: 6 }) {
+        Text(item.after.title).fontSize(16).fontColor($r('app.color.text_primary'))
+        Text('未安排 → ' + TaskService.dateLabel(item.after.dueAt) + ' ' + TaskService.timeLabel(item.after)).fontSize(13).fontColor($r('app.color.text_secondary'))
+        Text(item.reason).fontSize(12).fontColor($r('app.color.text_secondary'))
+      }.padding(16).width('100%').borderRadius(16).backgroundColor($r('app.color.card_background'))
+    })
+    ForEach(this.planReport.unscheduled, (reason: string) => { Text(reason).fontSize(13).fontColor($r('app.color.text_secondary')) })
+    Button('重新计算建议').height(48).onClick(() => this.proposePlan())
+    if (this.planReport.suggestions.length > 0) { Button('确认采用这些安排').height(48).onClick(() => this.applyPlan(false)) }
+    if (this.hasPlanUndo) { Button('撤销上次排程').height(48).onClick(() => this.applyPlan(true)) }
+  }
+  private editSmartDraft(draft: TaskDraft): void {
+    this.openEditor(); this.draftTitle = draft.title; this.draftNote = draft.note; this.draftPriority = draft.priority;
+    this.draftTags = draft.tagsText; this.draftDueAt = draft.dueAt; this.draftRepeat = draft.repeat ?? 'none';
+    this.draftStart = draft.startMinute ?? -1; this.draftDuration = (draft.durationMinutes ?? 30).toString();
+    this.draftLocation = draft.planning?.location ?? ''; this.notice = '正在编辑这一条；原文保留在一句话输入中。请核对后保存。';
+  }
+  private async saveSmartDrafts(drafts: TaskDraft[]): Promise<void> {
+    if (this.busy || !drafts.length) { return; } this.busy = true; this.error = '';
+    try { const now = Date.now(); const tasks = drafts.map((draft: TaskDraft) => TaskService.create(draft, util.generateRandomUUID(), now));
+      await this.repository.mergeBackup(BackupService.decode(BackupService.encode(tasks, [], now)));
+      await this.refreshData(); this.quickText = ''; this.changeMode('list'); this.selectedTab = 1; this.view = 'all';
+      this.notice = '已保存 ' + tasks.length.toString() + ' 条草稿';
+    } catch (error) { this.error = '保存失败，草稿仍保留：' + (error as Error).message; } finally { this.busy = false; }
   }
   private parseQuick(): void {
     try {
@@ -272,10 +407,12 @@ struct Index {
     if (this.busy) { return; }
     this.busy = true; this.error = '';
     try {
-      await this.repository.save(task);
+      if (this.editScope === 'future') { await this.repository.splitSeries(this.editingId, this.occurrenceDate, task, util.generateRandomUUID()); }
+      else { await this.repository.save(task); }
       await this.refreshData();
       this.query = ''; this.tagFilter = '';
       this.changeMode('list'); this.view = task.dueAt === 0 ? 'inbox' : 'scheduled';
+      if (this.selectedTab === 3) { this.selectedTab = 1; }
       if (this.selectedTab === 0 && task.dueAt === 0 && task.priority !== 2) { this.selectedTab = 1; }
       this.notice = PlanningService.isEvent(task) ? '事件已保存' : '任务已保存';
     } catch (error) { this.error = '保存失败：' + (error as Error).message + '。编辑内容仍保留。'; }
@@ -289,9 +426,10 @@ struct Index {
     try {
       const old = this.tasks.find((task: Task) => task.id === this.editingId);
       if (this.editingId.length > 0 && !old) { this.error = '任务已不存在，请返回列表'; return; }
-      const task = old ? TaskService.edit(old, draft, Date.now()) : TaskService.create(draft, util.generateRandomUUID(), Date.now());
+      const task = old && this.editScope === 'one' ? OccurrenceService.change(old, this.occurrenceDate, draft, Date.now()) :
+        old ? TaskService.edit(old, draft, Date.now()) : TaskService.create(draft, util.generateRandomUUID(), Date.now());
       const warnings: string[] = [];
-      if (old && (old.repeat !== task.repeat || old.dueAt !== task.dueAt) && this.states.some((state: OccurrenceState) => state.taskId === old.id)) {
+      if (this.editScope === 'all' && old && (old.repeat !== task.repeat || old.dueAt !== task.dueAt) && this.states.some((state: OccurrenceState) => state.taskId === old.id)) {
         warnings.push('已有历史的重复系列暂不支持更换起始日期或规则；请复制为新系列，原历史会保留。');
       } else if (old && JSON.stringify(old.steps ?? []) !== JSON.stringify(task.steps ?? []) &&
         ((old.doneSteps ?? []).length > 0 || this.states.some((state: OccurrenceState) => state.taskId === old.id && (state.doneSteps ?? []).length > 0))) {
@@ -552,7 +690,7 @@ struct Index {
   }
   private pageTitle(): string {
     return this.mode === 'list' ? this.tabTitle(this.selectedTab) : this.mode === 'editor' ? (this.editingId ? '编辑任务' : '新建任务') :
-      this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
+      this.mode === 'plan' ? '辅助排程' : this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
   }
   private calendarDays(): CalendarDay[] {
     return ScheduleService.month(this.tasks, this.states, this.month);
@@ -576,7 +714,7 @@ struct Index {
           this.expandedKeys = this.expandedKeys.includes(item.key) ? this.expandedKeys.filter((key: string) => key !== item.key) : this.expandedKeys.concat([item.key]);
         },
         doneSteps: item.doneSteps ?? [], onStep: (index: number) => this.toggleStep(item, index), onCopy: () => this.copyTask(item.task),
-        onToggle: () => this.toggle(item), onEdit: () => this.openEditor(item.task), onRemove: () => this.remove(item) })
+        onToggle: () => this.toggle(item), onEdit: () => this.openOccurrence(item), onRemove: () => this.remove(item) })
     }, (item: TaskItem) => ScheduleService.renderKey(item))
   }
 
@@ -722,12 +860,27 @@ struct Index {
         .fontSize(12).lineHeight(19).fontColor($r('app.color.text_secondary')).width('100%')
     }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))
     this.preferenceSettings()
+    Button('为空闲时间生成排程建议  ›').height(52).width('100%').onClick(() => this.proposePlan())
+    Column({ space: 8 }) {
+      Text('系统提醒').fontSize(17).fontColor($r('app.color.text_primary')).width('100%')
+      Text(this.reminderStatus).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
+      Text('只预约未来 7 天、最多 50 条；每次打开或修改任务时补齐。长期不打开不会自动续约。日期任务默认 09:00；不会绕过勿扰。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Button('启用授权 / 重试同步').height(44).onClick(async () => {
+        try { await this.reminders.enable(this.context()); this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states); }
+        catch (error) { this.reminderStatus = '启用失败：' + (error as Error).message; }
+      })
+      Button('关闭并取消已登记提醒').height(44).onClick(async () => {
+        try { await this.reminders.disable(this.context()); this.reminderStatus = '已关闭并取消提醒'; }
+        catch { this.reminderStatus = '取消未完成，请稍后重试；不能保证旧提醒已取消'; }
+      })
+    }.padding(16).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background'))
+    Button('语音、自然语言与 AI 配置  ›').height(52).width('100%').onClick(() => this.changeMode('quick'))
     Text('数据').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
     Button('备份、日历互通与恢复  ›', { type: ButtonType.Normal }).height(56).width('100%').fontSize(15)
       .borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
       .onClick(() => this.changeMode('tools'))
     Column({ space: 8 }) {
-      Text('TaiPlan 0.6.0 · 开发预览').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+      Text('TaiPlan 0.7.0 · 0.6/0.7 联合预览').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
       Text('待办是核心，日历帮助安排时间。\n任务保存在本机，建议定期导出备份。')
         .fontSize(13).lineHeight(21).fontColor($r('app.color.text_secondary'))
     }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 20, bottom: 16 })
@@ -754,6 +907,14 @@ struct Index {
             .fontColor(this.draftKind === kind ? $r('app.color.on_accent') : $r('app.color.text_primary'))
             .onClick(() => { this.draftKind = kind; if (kind === 'event') { this.draftDeadline = 0; this.draftDeadlineMode = 'none'; } })
         })
+      }
+      Row({ space: 8 }) {
+        Button(this.draftReminder === 'none' ? '提醒：关闭' : this.draftReminder === 'start' ? '提醒：安排前' : '提醒：截止前').height(44).fontSize(13)
+          .onClick(() => { const modes = ['none', 'start', 'deadline']; this.draftReminder = modes[(modes.indexOf(this.draftReminder) + 1) % modes.length]; })
+        if (this.draftReminder !== 'none') {
+          Button('提前 ' + this.draftLead.toString() + ' 分钟').height(44).fontSize(13)
+            .onClick(() => { const values = [0, 5, 10, 30, 60]; this.draftLead = values[(values.indexOf(this.draftLead) + 1) % values.length]; })
+        }
       }
       Text('安排日期（与截止期限独立）').fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
       Row({ space: 8 }) {
@@ -884,7 +1045,7 @@ struct Index {
         Button('导出 30 天日历').layoutWeight(1).height(44).fontSize(13).padding(4)
           .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent')).onClick(() => this.exportCalendar())
       }.width('100%')
-      Text('ICS 导出为单次事件快照，包含今天起 30 天的有日期事项；不是完整备份。导入不支持的时区、跨日和重复规则会逐项报告。')
+      Text('ICS 导出为未来 30 天单次快照；导入支持常见重复、排除日期和单次调课。复杂规则或不支持的时区整组报告；已有 UID 不自动覆盖。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Text('备份包含任务、时间、子任务、标签、顺序和重复完成记录。兼容旧版备份；恢复时只合并新任务，已有同 ID 任务保留。')
         .fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
@@ -991,10 +1152,14 @@ struct Index {
             .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).onClick(() => { this.showTaskDone = !this.showTaskDone; if (this.view === 'inbox') { this.view = 'all'; } })
           if (this.showTaskDone) { this.section(true, '已完成', 1) }
         } else if (page === 2) {
+          if (this.calendarUndoLabel) {
+            Button('撤销时间调整 · ' + this.calendarUndoLabel).height(44).width('100%').onClick(() => this.undoCalendarAdjustment())
+          }
           CalendarWorkspace({ tasks: this.tasks, states: this.states, selected: this.selectedDay, view: this.calendarView,
             weekStart: this.preferences.weekStart, now: this.now,
             onSelect: (day: string) => { this.selectedDay = day; this.month = day.slice(0, 7) + '-01'; },
-            onView: (view: string) => { this.calendarView = view; }, onEdit: (item: TaskItem) => this.openEditor(item.task),
+            onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => this.adjustCalendar(item, days, minutes, resize),
+            onView: (view: string) => { this.calendarView = view; }, onEdit: (item: TaskItem) => this.openOccurrence(item),
             onCreate: (day: string, minute: number) => { this.openEditor(); this.draftDueAt = ScheduleService.end(day); this.draftStart = minute; } })
           Text(this.selectedDay + ' · 当日事项').fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
           this.section(false, '待办', 2)
@@ -1098,7 +1263,8 @@ struct Index {
           Scroll(this.scroller) {
             Column({ space: 12 }) {
               if (this.mode === 'editor') { this.editor() }
-              else if (this.mode === 'quick') { this.quickEditor() }
+              else if (this.mode === 'plan') { this.planPage() }
+              else if (this.mode === 'quick') { SmartEntry({ initialText: this.quickText, saving: this.busy, onTextChange: (value: string) => { this.quickText = value; }, onEdit: (draft: TaskDraft) => this.editSmartDraft(draft), onSave: (drafts: TaskDraft[]) => this.saveSmartDrafts(drafts) }) }
               else if (this.mode === 'search') { this.searchPage() }
               else if (this.mode === 'tools') { this.toolsPage() }
               else if (this.mode === 'batch') { this.batchPage() }
@@ -1112,3 +1278,4 @@ struct Index {
         backgroundColor: $r('app.color.card_background'), systemMaterial: MaterialService.surface(this.preferences.useMaterial) })
   }
 }
+

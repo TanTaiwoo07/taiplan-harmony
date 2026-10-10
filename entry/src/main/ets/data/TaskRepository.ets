@@ -1,3 +1,6 @@
+import { ScheduleService } from '../services/ScheduleService';
+import { OccurrenceService } from '../services/OccurrenceService';
+import { OccurrenceOverride } from '../model/Task';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { preferences, relationalStore } from '@kit.ArkData';
 import { AppPreferences, TaskPlanning, BackupDocument, OccurrenceState, Task, TaskItem } from '../model/Task';
@@ -26,6 +29,7 @@ export class TaskRepository {
     await db.executeSql("CREATE TABLE IF NOT EXISTS task_details (task_id TEXT PRIMARY KEY, start_minute INTEGER NOT NULL, duration_minutes INTEGER NOT NULL, steps_json TEXT NOT NULL, done_steps_json TEXT NOT NULL)");
     await db.executeSql('CREATE TABLE IF NOT EXISTS task_step_states (task_id TEXT NOT NULL, date_key TEXT NOT NULL, done_json TEXT NOT NULL, PRIMARY KEY(task_id,date_key))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS task_planning (task_id TEXT PRIMARY KEY, document TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS occurrence_overrides (task_id TEXT PRIMARY KEY, document TEXT NOT NULL)');
     await this.migrate(context, db);
     await this.migratePlanning(db);
     return this.readTasks(db);
@@ -108,10 +112,16 @@ export class TaskRepository {
       const task = tasks.find((item: Task) => item.id === plans.getString(0));
       if (task) { task.planning = JSON.parse(plans.getString(1)) as TaskPlanning; }
     } } finally { plans.close(); }
+    const overrides = await db.querySql('SELECT task_id,document FROM occurrence_overrides');
+    try { while (overrides.goToNextRow()) { const task = tasks.find((item: Task) => item.id === overrides.getString(0));
+      if (task) { const entries = JSON.parse(overrides.getString(1)) as OccurrenceOverride[]; if (entries.length > 0) { task.overrides = entries; } }
+    } } finally { overrides.close(); }
     return tasks;
   }
 
   private async writeTask(db: relationalStore.RdbStore, task: Task): Promise<void> {
+    OccurrenceService.validate(task);
+    await db.executeSql('INSERT OR REPLACE INTO occurrence_overrides(task_id,document) VALUES (?,?)', [task.id, JSON.stringify(task.overrides ?? [])]);
     await db.executeSql('INSERT OR REPLACE INTO tasks(id,title,note,completed,created_at,updated_at,priority,due_at) VALUES (?,?,?,?,?,?,?,?)',
       [task.id, task.title, task.note, task.completed ? 1 : 0, task.createdAt, task.updatedAt, task.priority, task.dueAt]);
     await db.executeSql('INSERT OR REPLACE INTO task_planning(task_id,document) VALUES (?,?)', [task.id, JSON.stringify(PlanningService.forTask(task))]);
@@ -141,8 +151,44 @@ export class TaskRepository {
       finally { rows.close(); }
       if (reset) { await db.executeSql('DELETE FROM task_occurrences WHERE task_id=?', [task.id]); }
       if (reset || stepsChanged) { await db.executeSql('DELETE FROM task_step_states WHERE task_id=?', [task.id]); }
+      if (previous) {
+        const dates = new Set<string>((previous.overrides ?? []).concat(task.overrides ?? []).map((entry: OccurrenceOverride) => entry.originalDate));
+        for (const date of dates) {
+          if (JSON.stringify(OccurrenceService.effective(previous, date).steps ?? []) !== JSON.stringify(OccurrenceService.effective(task, date).steps ?? [])) {
+            await db.executeSql('DELETE FROM task_step_states WHERE task_id=? AND date_key=?', [task.id, date]);
+          }
+        }
+      }
       await this.writeTask(db, task); db.commit();
     }
+    catch (error) { db.rollBack(); throw error as Error; }
+  }
+
+  async saveBatch(tasks: Task[]): Promise<void> {
+    const db = this.store; if (!db) { throw new Error('数据库尚未就绪'); }
+    if (tasks.some((task: Task) => task.repeat !== 'none')) { throw new Error('批量排程只支持单次任务'); }
+    db.beginTransaction();
+    try { for (const task of tasks) { await this.writeTask(db, task); } db.commit(); }
+    catch (error) { db.rollBack(); throw error as Error; }
+  }
+  async splitSeries(id: string, date: string, edited: Task, nextId: string): Promise<void> {
+    const db = this.store; if (!db) { throw new Error('数据库尚未就绪'); }
+    const old = (await this.readTasks(db)).find((task: Task) => task.id === id);
+    if (!old || old.repeat === 'none' || !ScheduleService.occursOn(old, date) || date <= ScheduleService.key(old.dueAt)) {
+      throw new Error('首个发生项请使用整个系列编辑');
+    }
+    if ((await this.getOccurrences()).some((state: OccurrenceState) => state.taskId === id && state.dateKey >= date) ||
+      (old.overrides ?? []).some((entry: OccurrenceOverride) => entry.originalDate >= date)) { throw new Error('未来已有完成记录或例外，请先采用仅这一次编辑'); }
+    const previous = TaskService.withCompletion(old, false, Date.now());
+    previous.planning = PlanningService.forTask(old); previous.planning.rule.untilDate = ScheduleService.shift(date, -1); previous.planning.rule.count = 0;
+    const next = TaskService.create(OccurrenceService.draft(edited), nextId, Date.now());
+    if (next.planning && next.planning.rule.count > 0) {
+      let used = 0;
+      for (let day = ScheduleService.key(old.dueAt); day < date; day = ScheduleService.shift(day, 1)) { if (ScheduleService.occursOn(old, day)) { used++; } }
+      next.planning.rule.count = Math.max(1, next.planning.rule.count - used);
+    }
+    db.beginTransaction();
+    try { await this.writeTask(db, previous); await this.writeTask(db, next); db.commit(); }
     catch (error) { db.rollBack(); throw error as Error; }
   }
 
@@ -157,6 +203,7 @@ export class TaskRepository {
       await db.executeSql('DELETE FROM task_details WHERE task_id = ?', [id]);
       await db.executeSql('DELETE FROM task_step_states WHERE task_id = ?', [id]);
       await db.executeSql('DELETE FROM task_planning WHERE task_id = ?', [id]);
+      await db.executeSql('DELETE FROM occurrence_overrides WHERE task_id=?', [id]);
       await db.executeSql('DELETE FROM tasks WHERE id = ?', [id]);
       db.commit();
     } catch (error) { db.rollBack(); throw error as Error; }
