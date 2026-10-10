@@ -6,3 +6,8 @@ local.properties
 *.p12
 *.p7b
 *.cer
+.hvigor-copied-backup/
+**/build-copied-backup/
+original-hashes-before.json
+build-test.log
+tests/layout.json
