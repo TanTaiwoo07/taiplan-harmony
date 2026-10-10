@@ -1,7 +1,9 @@
-import { CalendarDay, OccurrenceState, Task, TaskItem } from '../model/Task';
+import { CalendarDay, OccurrenceState, Task, TaskItem, TimeConflict } from '../model/Task';
 import { TaskService } from './TaskService';
 
 export class ScheduleService {
+  // ArkUI V1 ForEach 保留相同 key 的构建闭包；投影对象改变时需重建该卡片。
+  static renderKey(item: TaskItem): string { return JSON.stringify(item); }
   static key(value: number): string {
     const date = new Date(value);
     return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`;
@@ -45,12 +47,12 @@ export class ScheduleService {
   private static indexedItem(task: Task, key: string, states: Map<string, OccurrenceState>): TaskItem | undefined {
     if (task.repeat === 'none') {
       return { key: task.id, task: task, dateKey: task.dueAt > 0 ? ScheduleService.key(task.dueAt) : '',
-        dueAt: task.dueAt, completed: task.completed };
+        dueAt: task.dueAt, completed: task.completed, doneSteps: (task.doneSteps ?? []).slice() };
     }
     const state = states.get(`${task.id}@${key}`);
     if (state?.skipped) { return undefined; }
     return { key: `${task.id}@${key}`, task: task, dateKey: key,
-      dueAt: ScheduleService.end(key), completed: state?.completed ?? false };
+      dueAt: ScheduleService.end(key), completed: state?.completed ?? false, doneSteps: (state?.doneSteps ?? []).slice() };
   }
   static nextDate(task: Task, start: string): string {
     const anchor = ScheduleService.key(task.dueAt);
@@ -104,13 +106,27 @@ export class ScheduleService {
     }
     return items;
   }
-  static filter(items: TaskItem[], completed: boolean, query: string, tag: string, manual: boolean): TaskItem[] {
+  static sortLabel(mode: string): string {
+    return mode === 'manual' ? '手动顺序' : mode === 'time' ? '时间先后' : mode === 'priority' ? '优先级' : '创建倒序';
+  }
+  static filter(items: TaskItem[], completed: boolean, query: string, tag: string, mode: string): TaskItem[] {
     const keyword = query.trim().toLocaleLowerCase();
     return items.filter((item: TaskItem) => item.completed === completed &&
       (tag.length === 0 || item.task.tags.includes(tag)) &&
       (keyword.length === 0 || `${item.task.title}\n${item.task.note}\n${item.task.tags.join(' ')}`.toLocaleLowerCase().includes(keyword)))
-      .sort((a: TaskItem, b: TaskItem) => (manual ? a.task.sortOrder - b.task.sortOrder : b.task.createdAt - a.task.createdAt) ||
-        a.dueAt - b.dueAt || b.key.localeCompare(a.key));
+      .sort((a: TaskItem, b: TaskItem) => {
+        let order = 0;
+        if (mode === 'manual') { order = a.task.sortOrder - b.task.sortOrder; }
+        else if (mode === 'priority') { order = b.task.priority - a.task.priority; }
+        else if (mode === 'time') {
+          const aTime = a.dueAt === 0 ? Number.MAX_SAFE_INTEGER : TaskService.deadline(a.task, a.dueAt) -
+            ((a.task.startMinute ?? -1) >= 0 ? (a.task.durationMinutes ?? 30) * 60000 : 0);
+          const bTime = b.dueAt === 0 ? Number.MAX_SAFE_INTEGER : TaskService.deadline(b.task, b.dueAt) -
+            ((b.task.startMinute ?? -1) >= 0 ? (b.task.durationMinutes ?? 30) * 60000 : 0);
+          order = aTime - bTime;
+        } else { order = b.task.createdAt - a.task.createdAt; }
+        return order || b.task.createdAt - a.task.createdAt || a.dueAt - b.dueAt || b.key.localeCompare(a.key);
+      });
   }
   static month(tasks: Task[], states: OccurrenceState[], month: string): CalendarDay[] {
     const stateIndex = ScheduleService.indexStates(states);
@@ -139,5 +155,36 @@ export class ScheduleService {
     const item = next.splice(from, 1)[0];
     next.splice(to, 0, item);
     return next;
+  }
+  static conflicts(candidate: Task, tasks: Task[], states: OccurrenceState[], now: number): TimeConflict[] {
+    const result: TimeConflict[] = [];
+    if ((candidate.startMinute ?? -1) < 0 || candidate.dueAt === 0 || candidate.completed) { return result; }
+    const anchor = ScheduleService.key(candidate.dueAt);
+    const today = ScheduleService.key(now);
+    const first = candidate.repeat === 'none' || anchor > today ? anchor : today;
+    const start = candidate.startMinute ?? 0;
+    const end = start + (candidate.durationMinutes ?? 30);
+    const index = ScheduleService.indexStates(states);
+    const existing = tasks.find((task: Task) => task.id === candidate.id);
+    const keepHistory = existing !== undefined && existing.repeat === candidate.repeat && existing.dueAt === candidate.dueAt;
+    for (let day = 0; day < (candidate.repeat === 'none' ? 1 : 30); day++) {
+      const key = ScheduleService.shift(first, day);
+      if (!ScheduleService.occursOn(candidate, key)) { continue; }
+      if (keepHistory) {
+        const own = ScheduleService.indexedItem(candidate, key, index);
+        if (!own || own.completed) { continue; }
+      }
+      for (const task of tasks) {
+        if (task.id === candidate.id || (task.startMinute ?? -1) < 0 || !ScheduleService.occursOn(task, key)) { continue; }
+        const item = ScheduleService.indexedItem(task, key, index);
+        if (!item || item.completed) { continue; }
+        const otherStart = task.startMinute ?? 0;
+        if (start < otherStart + (task.durationMinutes ?? 30) && end > otherStart) {
+          result.push({ title: task.title, dateKey: key, time: TaskService.timeLabel(task) });
+          if (result.length === 5) { return result; }
+        }
+      }
+    }
+    return result;
   }
 }

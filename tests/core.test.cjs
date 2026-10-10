@@ -232,14 +232,14 @@ test('Calendar produces six Monday-first weeks and counts completed but not skip
   assert.equal(days.find(d => d.key === '2026-10-11').count, 0);
 });
 test('Date-based recurrence survives daylight-saving transitions', () => {
-  const previous = process.env.TZ;
+  const previous = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   process.env.TZ = 'America/New_York';
   try {
     assert.equal(Calendar.shift('2026-03-07', 2), '2026-03-09');
     assert.equal(Calendar.shift('2026-10-31', 2), '2026-11-02');
     const task = makeRepeat('weekly', '2026-03-01');
     assert.equal(Calendar.occursOn(task, '2026-03-08'), true);
-  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+  } finally { process.env.TZ = previous; }
 });
 test('Natural-language quick entry creates a reviewable draft with date, tags and priority', () => {
   const parsed = Quick.parse('明天 交报告 #学习 高优先级', date('2026-10-10'));
@@ -346,4 +346,282 @@ test('Next occurrence survives skipping more than a year of monthly occurrences'
     next = Calendar.nextDate(task, Calendar.shift(next, 1));
   }
   assert.equal(Calendar.project([task], states, 'all', '', date('2026-01-01'))[0].dateKey, '2027-07-31');
+});
+
+test('Timed tasks validate minutes and do not cross midnight; deadlines use the interval end', () => {
+  const valid = draft({ dueAt: date('2026-10-10'), startMinute: 14 * 60 + 30, durationMinutes: 60 });
+  const task = S.create(valid, 'timed', 1);
+  assert.equal(S.timeLabel(task), '14:30–15:30');
+  assert.equal(new Date(S.deadline(task, task.dueAt)).getHours(), 15);
+  assert.equal(S.isOverdue(task, S.deadline(task, task.dueAt) + 1), true);
+  assert.equal(S.isOverdue(task, S.deadline(task, task.dueAt) - 1), false);
+  assert.equal(S.timeLabel(S.create({ ...valid, startMinute: 1435, durationMinutes: 5 }, 'end', 1)), '23:55–24:00');
+  for (const bad of [{ startMinute: -2 }, { startMinute: 1440 }, { startMinute: 1.5 }, { durationMinutes: 0 },
+    { durationMinutes: 1441 }, { durationMinutes: 5.5 }, { startMinute: 1439, durationMinutes: 5 }, { dueAt: 0 }]) {
+    assert.throws(() => S.create({ ...valid, ...bad }, 'bad', 1));
+  }
+});
+
+test('Checklist limits and toggles preserve source arrays; edits reset progress only when steps change', () => {
+  const task = S.create(draft({ stepsText: ' 整理资料\n\n写初稿 🥰 ' }), 'a', 1);
+  assert.deepEqual(plain(task.steps), ['整理资料', '写初稿 🥰']);
+  task.doneSteps = S.toggleStep([], 1, 2);
+  const next = S.toggleStep(task.doneSteps, 0, 2);
+  assert.deepEqual(plain(task.doneSteps), [1]); assert.deepEqual(plain(next), [0, 1]);
+  const unchanged = S.edit(task, draft({ title: '新标题', stepsText: task.steps.join('\n') }), 2);
+  assert.deepEqual(plain(unchanged.doneSteps), [1]);
+  const changed = S.edit(task, draft({ stepsText: '新步骤' }), 3);
+  assert.deepEqual(plain(changed.doneSteps), []);
+  assert.throws(() => S.parseSteps(Array(21).fill('step').join('\n')));
+  assert.throws(() => S.parseSteps('x'.repeat(101)));
+  assert.throws(() => S.toggleStep([], 2, 2));
+  assert.throws(() => S.validateDone([0, 0], 2));
+});
+
+test('Copies created from a draft start with no completion history and leave source untouched', () => {
+  const source = S.create(draft({ stepsText: '一步\n二步', startMinute: 600, durationMinutes: 45, dueAt: date('2026-10-10') }), 'a', 1);
+  source.completed = true; source.doneSteps = [0, 1];
+  const copy = S.create(draft({ title: source.title, note: source.note, stepsText: source.steps.join('\n'),
+    dueAt: source.dueAt, startMinute: source.startMinute, durationMinutes: source.durationMinutes }), 'b', 2);
+  assert.equal(copy.completed, false); assert.deepEqual(plain(copy.doneSteps), []);
+  assert.equal(source.completed, true); assert.deepEqual(plain(source.doneSteps), [0, 1]);
+});
+
+test('Quick entry parses explicit clock and duration with a reviewable date', () => {
+  const now = new Date(2026, 9, 10, 8).getTime();
+  const parsed = Quick.parse('明天 14:30 交报告 用时60分钟 #学习 高优先级', now);
+  assert.equal(parsed.title, '交报告'); assert.equal(parsed.startMinute, 870); assert.equal(parsed.durationMinutes, 60);
+  assert.equal(Calendar.key(parsed.dueAt), '2026-10-11'); assert.equal(parsed.priority, 2);
+  assert.equal(Calendar.key(Quick.parse('09:00 开会', now).dueAt), '2026-10-10');
+  assert.throws(() => Quick.parse('明天 25:00 开会', now));
+  assert.throws(() => S.create(Quick.parse('明天 23:50 开会 用时60分钟', now), 'x', now));
+});
+
+const timed = (id, start, duration = 30, repeat = 'none', day = '2026-10-10') =>
+  S.create(draft({ title: id, dueAt: date(day), startMinute: start, durationMinutes: duration, repeat }), id, 1);
+
+test('Conflict checks detect overlap but allow touching intervals and ignore completed or all-day tasks', () => {
+  const own = timed('a', 600, 60);
+  const candidates = [timed('b', 630), timed('c', 660), timed('d', 570),
+    S.withCompletion(timed('done', 610), true, 2), S.create(draft({ dueAt: date('2026-10-10') }), 'all-day', 1), own];
+  assert.deepEqual(plain(Calendar.conflicts(own, candidates, [], date('2026-10-10')).map(x => x.title)), ['b']);
+});
+
+test('Recurring conflict checks respect individual skipped/completed dates and rule changes', () => {
+  const own = timed('a', 600, 30, 'daily');
+  const other = timed('b', 610, 30, 'daily');
+  const states = [state('b', '2026-10-10', false, true), state('b', '2026-10-11'), state('a', '2026-10-12')];
+  const conflicts = Calendar.conflicts(own, [own, other], states, date('2026-10-10'));
+  assert.equal(conflicts[0].dateKey, '2026-10-13'); assert.equal(conflicts.length, 5);
+  const moved = { ...own, dueAt: date('2026-10-12') };
+  assert.equal(Calendar.conflicts(moved, [own, other], states, date('2026-10-10'))[0].dateKey, '2026-10-12');
+});
+
+test('Recurring checklist state projects independently on each date', () => {
+  const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读\n写' }), 'r', 1);
+  const states = [{ ...state('r', '2026-10-10', false), doneSteps: [0] }];
+  assert.deepEqual(plain(Calendar.item(task, '2026-10-10', states).doneSteps), [0]);
+  assert.deepEqual(plain(Calendar.item(task, '2026-10-11', states).doneSteps), []);
+});
+
+test('Old database records acquire safe defaults and rich details survive a new repository instance', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const old = makeRepeat('daily', '2026-10-10'); delete old.startMinute; delete old.durationMinutes; delete old.steps; delete old.doneSteps;
+  await f.repo.save(old); f.db.prepare('DELETE FROM task_details').run();
+  let [task] = await f.newRepo().load(f.context);
+  assert.equal(task.startMinute, -1); assert.deepEqual(plain(task.steps), []);
+  const rich = S.edit(task, draft({ repeat: 'daily', dueAt: task.dueAt, startMinute: 600, durationMinutes: 45, stepsText: '读\n写' }), 2);
+  await f.repo.save(rich);
+  await f.repo.setOccurrence({ ...state('r', '2026-10-10', false), doneSteps: [1] });
+  const repo = f.newRepo(); [task] = await repo.load(f.context);
+  assert.equal(task.startMinute, 600); assert.equal(task.durationMinutes, 45); assert.deepEqual(plain(task.steps), ['读', '写']);
+  assert.deepEqual(plain((await repo.getOccurrences())[0].doneSteps), [1]); f.db.close();
+});
+
+test('Changing checklist template resets dated step progress but preserves completion; time-only edit preserves both', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  let task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读\n写' }), 'r', 1);
+  await f.repo.save(task); await f.repo.setOccurrence({ ...state('r', '2026-10-10'), doneSteps: [0] });
+  task = S.edit(task, draft({ repeat: 'daily', dueAt: task.dueAt, stepsText: '读\n写', startMinute: 600 }), 2);
+  await f.repo.save(task); assert.deepEqual(plain((await f.repo.getOccurrences())[0].doneSteps), [0]);
+  task = S.edit(task, draft({ repeat: 'daily', dueAt: task.dueAt, stepsText: '新步骤', startMinute: 600 }), 3);
+  await f.repo.save(task); const states = await f.repo.getOccurrences();
+  assert.equal(states[0].completed, true); assert.deepEqual(plain(states[0].doneSteps), []); f.db.close();
+});
+
+test('Occurrence and checklist writes roll back together on a disk error', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  await f.repo.save(S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读' }), 'r', 1));
+  await f.repo.setOccurrence({ ...state('r', '2026-10-10', false), doneSteps: [] });
+  f.fail('INSERT OR REPLACE INTO task_step_states');
+  await assert.rejects(() => f.repo.setOccurrence({ ...state('r', '2026-10-10'), doneSteps: [0] })); f.fail('');
+  const [result] = await f.repo.getOccurrences(); assert.equal(result.completed, false); assert.deepEqual(plain(result.doneSteps), []); f.db.close();
+});
+
+test('Batch completion preserves checklist progress and affects only selected repeat dates', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const single = S.create(draft({ stepsText: '写' }), 'a', 1); single.doneSteps = [0];
+  const series = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读' }), 'r', 1);
+  await f.repo.save(single); await f.repo.save(series);
+  const states = [{ ...state('r', '2026-10-10', false), doneSteps: [0] }];
+  await f.repo.setOccurrence(states[0]);
+  const items = [Calendar.item(single, '', states), Calendar.item(series, '2026-10-10', states)];
+  await f.repo.setCompleted(items, true, 2);
+  assert.equal((await f.repo.reload()).find(t => t.id === 'a').completed, true);
+  assert.deepEqual(plain((await f.repo.reload()).find(t => t.id === 'a').doneSteps), [0]);
+  const updated = await f.repo.getOccurrences(); assert.equal(updated[0].completed, true); assert.deepEqual(plain(updated[0].doneSteps), [0]);
+  assert.equal(Calendar.item(series, '2026-10-11', updated).completed, false);
+  await f.repo.setCompleted(items, false, 3); assert.equal((await f.repo.getOccurrences())[0].completed, false); f.db.close();
+});
+
+test('Batch completion is atomic across ordinary and repeated tasks', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const a = S.create(draft(), 'a', 1), r = makeRepeat('daily', '2026-10-10');
+  await f.repo.save(a); await f.repo.save(r);
+  f.fail('INSERT OR REPLACE INTO task_step_states');
+  await assert.rejects(() => f.repo.setCompleted([Calendar.item(a, '', []), Calendar.item(r, '2026-10-10', [])], true, 2));
+  f.fail(''); assert.equal((await f.repo.reload()).find(t => t.id === 'a').completed, false);
+  assert.equal((await f.repo.getOccurrences()).length, 0); f.db.close();
+});
+
+test('Version 4 backups preserve time and checklists; version 3 still imports with defaults', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), startMinute: 720, stepsText: '读\n写' }), 'r', 1);
+  const doc = Backup.decode(Backup.encode([task], [{ ...state('r', '2026-10-10'), doneSteps: [1] }], 100));
+  assert.equal(doc.version, 4); await f.repo.mergeBackup(doc);
+  assert.equal((await f.repo.reload())[0].startMinute, 720); assert.deepEqual(plain((await f.repo.getOccurrences())[0].doneSteps), [1]);
+  const old = { ...makeRepeat('weekly', '2026-10-12', 'old') };
+  for (const key of ['startMinute', 'durationMinutes', 'steps', 'doneSteps']) delete old[key];
+  await f.repo.mergeBackup(Backup.decode(JSON.stringify({ format: 'TaiPlanHarmony', version: 3, exportedAt: 100, tasks: [old], occurrences: [] })));
+  assert.equal((await f.repo.reload()).find(t => t.id === 'old').startMinute, -1); f.db.close();
+});
+
+test('Backup rejects malformed time and checklist state instead of storing invalid indices', () => {
+  const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读' }), 'r', 1);
+  for (const patch of [{ steps: null }, { steps: [''] }, { steps: ['a\nb'] }, { startMinute: null }, { durationMinutes: '30' }, { doneSteps: null }, { doneSteps: [0] }]) {
+    assert.throws(() => Backup.encode([{ ...task, ...patch }], [], 100));
+  }
+  for (const doneSteps of [null, [1], [-1], [0, 0], ['0']]) {
+    assert.throws(() => Backup.encode([task], [{ ...state('r', '2026-10-10'), doneSteps }], 100));
+  }
+});
+
+test('Deleting a rich task removes both new detail tables as well as old records', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  await f.repo.save(S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读' }), 'r', 1));
+  await f.repo.setOccurrence({ ...state('r', '2026-10-10'), doneSteps: [0] }); await f.repo.remove('r');
+  for (const table of ['tasks', 'task_tags', 'task_options', 'task_occurrences', 'task_details', 'task_step_states']) {
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ' + table).get().n, 0);
+  }
+  f.db.close();
+});
+test('Time sorting orders intervals by start, then all-day tasks, and places undated tasks last', () => {
+  const a = timed('early', 540, 120), b = timed('later', 600, 10);
+  const c = S.create(draft({ dueAt: date('2026-10-10') }), 'all-day', 3), d = S.create(draft(), 'undated', 4);
+  const items = Calendar.project([d, c, b, a], [], 'all', '', date('2026-10-10'));
+  assert.deepEqual(plain(Calendar.filter(items, false, '', '', 'time').map(i => i.task.id)), ['early', 'later', 'all-day', 'undated']);
+  a.priority = 2;
+  assert.equal(Calendar.filter(items, false, '', '', 'priority')[0].task.id, 'early');
+});
+
+test('New sorting preferences survive reload and reject unrecognized modes', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  await f.repo.setSortMode('time'); const repo = f.newRepo(); await repo.load(f.context); assert.equal(await repo.getSortMode(), 'time');
+  await assert.rejects(() => repo.setSortMode('bad')); assert.equal(await repo.getSortMode(), 'time'); f.db.close();
+});
+const { IcsService: Ics } = loadModule('services/IcsService.ets');
+const ics = events => 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' + events.map(lines => 'BEGIN:VEVENT\r\n' + lines.join('\r\n') + '\r\nEND:VEVENT\r\n').join('') + 'END:VCALENDAR\r\n';
+
+test('ICS parses escaped/folded text, floating time and Shanghai/UTC timezone conversion', () => {
+  const raw = ics([['UID:calendar-1', 'SUMMARY:中文\\,报告', 'DESCRIPTION:第一行\\n第二行', 'DTSTART;TZID=Asia/Shanghai:20261011T143000', 'DTEND:20261011T073000Z', 'PRIORITY:1'],
+    ['UID:calendar-2', 'SUMMARY:Folded ', ' title', 'DTSTART:20261011T100000', 'DTEND:20261011T103000']]);
+  const report = Ics.parse(raw, 100); assert.equal(report.document.tasks.length, 2); assert.equal(report.notes.length, 0);
+  const a = report.document.tasks[0]; assert.equal(a.title, '中文,报告'); assert.equal(a.note, '第一行\n第二行');
+  const local = new Date('2026-10-11T06:30:00Z');
+  assert.equal(a.startMinute, local.getHours() * 60 + local.getMinutes()); assert.equal(a.durationMinutes, 60); assert.equal(a.priority, 2);
+  assert.equal(report.document.tasks[1].title, 'Folded title');
+});
+
+test('ICS reports each unsupported or invalid event and deduplicates UID without silently changing its meaning', () => {
+  const base = ['UID:u', 'SUMMARY:任务', 'DTSTART;VALUE=DATE:20261011', 'DTEND;VALUE=DATE:20261012'];
+  const report = Ics.parse(ics([base, base, [...base, 'RRULE:FREQ=DAILY'],
+    ['UID:z', 'SUMMARY:时区', 'DTSTART;TZID=Unknown/Zone:20261011T100000'],
+    ['UID:x', 'SUMMARY:跨日', 'DTSTART:20261011T233000', 'DTEND:20261012T003000'],
+    ['UID:s', 'SUMMARY:秒数', 'DTSTART:20261011T100030'], [...base, 'STATUS:CANCELLED']]), 100);
+  assert.equal(report.document.tasks.length, 1); assert.equal(report.notes.length, 6);
+  assert.match(report.notes.join('\n'), /UID 重复/); assert.match(report.notes.join('\n'), /RRULE/);
+  assert.throws(() => Ics.parse('BEGIN:VCALENDAR\nBEGIN:VEVENT\nEND:VCALENDAR', 100));
+});
+
+test('ICS export is a bounded snapshot, folds UTF-8 lines and preserves date/time/completion on reimport', () => {
+  const now = new Date(2026, 9, 10, 8).getTime();
+  const recurring = S.create(draft({ title: '中文🥰'.repeat(18), repeat: 'daily', dueAt: date('2026-10-10'),
+    startMinute: 870, durationMinutes: 60, stepsText: '读\n写' }), 'repeat', now);
+  const raw = Ics.exportMonth([recurring], [{ ...state('repeat', '2026-10-10'), doneSteps: [0] }, state('repeat', '2026-10-11', false, true)], now);
+  for (const line of raw.split('\r\n')) assert.ok(Buffer.byteLength(line) <= 75);
+  const report = Ics.parse(raw, now); assert.equal(report.notes.length, 0); assert.equal(report.document.tasks.length, 29);
+  const first = report.document.tasks[0]; assert.equal(first.title, recurring.title); assert.equal(first.startMinute, 870);
+  assert.equal(first.durationMinutes, 60); assert.equal(first.completed, true); assert.match(first.note, /\[x\] 读/);
+  assert.equal(report.document.tasks.at(-1).dueAt, date('2026-11-08'));
+});
+
+test('ICS import uses ordinary backup merge and remains idempotent across repeat file selection', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const doc = Ics.parse(ics([['UID:same', 'SUMMARY:日历事项', 'DTSTART;VALUE=DATE:20261011']]), 100).document;
+  assert.equal(await f.repo.mergeBackup(doc), 1); assert.equal(await f.repo.mergeBackup(doc), 0); f.db.close();
+});
+
+const { convertRows, transfer } = require('../tools/desktop-transfer.cjs');
+const desktopRow = (overrides = {}) => ({ id: 1, title: '桌面任务 🥰', description: '原备注', url: 'https://example.com', date: '2026-10-11',
+  time: '09:30', priority: 'urgent', is_completed: 0, created_at: '2026-10-01 10:00:00', updated_at: '2026-10-02 11:00:00',
+  is_recurring: 0, recurrence_frequency: null, recurrence_interval: 1, recurrence_end_type: null, recurrence_end_date: null,
+  recurrence_stop_before: null, duration_minutes: 60, ...overrides });
+
+test('Desktop transfer retains ordinary fields and creates a valid Harmony backup', () => {
+  const result = convertRows([desktopRow({ is_completed: 1 })], [], [], 'my-desktop', 100);
+  const task = Backup.decode(JSON.stringify(result.document)).tasks[0];
+  assert.equal(task.id, 'desktop:my-desktop:1'); assert.equal(task.startMinute, 570); assert.equal(task.durationMinutes, 60);
+  assert.equal(task.completed, true); assert.equal(task.priority, 2); assert.match(task.note, /原备注\n链接：https/);
+  assert.equal(result.report.skippedSourceTasks, 0);
+});
+
+test('Desktop recurrence completion, cancellations and moved occurrences retain their meaning', () => {
+  const row = desktopRow({ is_recurring: 1, recurrence_frequency: 'daily', recurrence_end_type: 'never' });
+  const states = [{ task_id: 1, occurrence_key: '2026-10-11T09:30', status: 'completed' },
+    { task_id: 1, occurrence_key: '2026-10-12T09:30', status: 'cancelled' }];
+  const overrides = [{ task_id: 1, occurrence_key: '2026-10-11T09:30', override_date: '2026-10-13', override_time: '14:00', override_duration_minutes: 45 }];
+  const result = convertRows([row], states, overrides, 'desk', 100);
+  const doc = Backup.decode(JSON.stringify(result.document));
+  assert.equal(doc.tasks.length, 2); assert.equal(doc.tasks[0].repeat, 'daily');
+  assert.equal(doc.tasks[1].completed, true); assert.equal(doc.tasks[1].startMinute, 840); assert.equal(doc.tasks[1].durationMinutes, 45);
+  assert.equal(doc.tasks[1].dueAt, date('2026-10-13')); assert.equal(doc.occurrences.every(s => s.skipped), true);
+});
+
+test('Unsupported desktop series and invalid moved records are reported as a whole, never silently flattened', () => {
+  const unsupported = desktopRow({ id: 1, is_recurring: 1, recurrence_frequency: 'weekly', recurrence_interval: 2 });
+  const finite = desktopRow({ id: 2, is_recurring: 1, recurrence_frequency: 'daily', recurrence_end_type: 'on_date', recurrence_end_date: '2026-11-01' });
+  const invalidMove = desktopRow({ id: 3, is_recurring: 1, recurrence_frequency: 'monthly' });
+  const result = convertRows([unsupported, finite, invalidMove], [], [{ task_id: 3, occurrence_key: '2026-10-12T09:30', override_date: '2026-10-14' }], 'desk', 100);
+  assert.equal(result.document.tasks.length, 0); assert.equal(result.report.skippedSourceTasks, 3); assert.equal(result.report.notes.length, 3);
+});
+
+test('Desktop SQLite conversion works on a copied snapshot, preserves source hash, and refuses overwrites/WAL', () => {
+  const dir = fs.mkdtempSync(path.join(__dirname, '.transfer-test-'));
+  const input = path.join(dir, 'desktop.db'), output = path.join(dir, 'harmony.json');
+  try {
+    const db = new DatabaseSync(input);
+    db.exec('CREATE TABLE tasks(id INTEGER PRIMARY KEY,title TEXT,description TEXT,url TEXT,date TEXT,time TEXT,priority TEXT,is_completed INTEGER,created_at TEXT,updated_at TEXT,duration_minutes INTEGER)');
+    db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(1, '真实 SQLite 测试', '中文', null, '2026-10-11', '09:30', 'normal', 0, '2026-10-01 10:00:00', '2026-10-01 10:00:00', 45); db.close();
+    const original = fs.readFileSync(input);
+    const result = transfer(input, output, 'fixture'); assert.equal(result.outputTasks, 1);
+    assert.deepEqual(fs.readFileSync(input), original); assert.equal(fs.existsSync(input + '-shm'), false);
+    assert.equal(Backup.decode(fs.readFileSync(output, 'utf8')).tasks[0].durationMinutes, 45);
+    assert.throws(() => transfer(input, output, 'fixture'), /已存在/);
+    fs.writeFileSync(input + '-wal', 'simulated');
+    assert.throws(() => transfer(input, path.join(dir, 'other.json'), 'fixture'), /WAL/);
+    assert.equal(fs.readdirSync(dir).some(name => name.startsWith('.taiplan-transfer-')), false);
+  } finally {
+    const real = fs.realpathSync(dir);
+    if (path.dirname(real) === fs.realpathSync(__dirname) && path.basename(real).startsWith('.transfer-test-')) fs.rmSync(real, { recursive: true });
+  }
 });

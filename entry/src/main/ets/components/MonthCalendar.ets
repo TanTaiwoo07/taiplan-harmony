@@ -11,13 +11,13 @@ export struct MonthCalendar {
   build() {
     Column({ space: 8 }) {
       Row() {
-        Button('‹').height(36).width(38).fontSize(24).backgroundColor(Color.Transparent)
+        Button('‹').height(36).width(38).padding(0).fontSize(24).backgroundColor(Color.Transparent)
           .fontColor($r('app.color.accent')).accessibilityText('上个月').onClick(() => this.onMonth(-1))
         Text(this.month.slice(0, 7)).fontSize(18).fontWeight(FontWeight.Bold).layoutWeight(1)
           .fontColor($r('app.color.text_primary')).textAlign(TextAlign.Center)
         Button('今天').height(32).fontSize(12).backgroundColor(Color.Transparent)
           .fontColor($r('app.color.accent')).onClick(() => this.onToday())
-        Button('›').height(36).width(38).fontSize(24).backgroundColor(Color.Transparent)
+        Button('›').height(36).width(38).padding(0).fontSize(24).backgroundColor(Color.Transparent)
           .fontColor($r('app.color.accent')).accessibilityText('下个月').onClick(() => this.onMonth(1))
       }.width('100%')
       Row() {
@@ -37,7 +37,7 @@ export struct MonthCalendar {
               .opacity(day.inMonth ? 1 : 0.5)
               .backgroundColor(day.key === this.selected ? $r('app.color.accent') : Color.Transparent)
           }.accessibilityText(`${day.key}，${day.count}件任务`).onClick(() => this.onSelect(day.key))
-        }, (day: CalendarDay) => `${day.key}:${day.count}`)
+        }, (day: CalendarDay) => `${day.key}:${day.count}:${day.inMonth}`)
       }.columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr 1fr').rowsGap(2).height(250)
     }.padding(10).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background'))
   }

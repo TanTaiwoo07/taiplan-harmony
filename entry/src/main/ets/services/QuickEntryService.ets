@@ -14,6 +14,16 @@ export class QuickEntryService {
     const today = ScheduleService.key(now);
     let key = '';
     let repeat = 'none';
+    let startMinute = -1;
+    let durationMinutes = 30;
+    const clock = title.match(/(?:^|\s)(\d{1,2})[:：](\d{2})(?=\s|$)/);
+    if (clock) {
+      const hour = Number(clock[1]); const minute = Number(clock[2]);
+      if (hour > 23 || minute > 59) { throw new Error('时间无效，请使用 00:00～23:59'); }
+      startMinute = hour * 60 + minute; title = title.replace(clock[0], ' ');
+    }
+    const duration = title.match(/(?:用时|持续)\s*(\d+)\s*分钟/);
+    if (duration) { durationMinutes = Number(duration[1]); title = title.replace(duration[0], ' '); }
     const weekly = title.match(/每周([一二三四五六日天])?/);
     if (/每天|每日/.test(title)) { repeat = 'daily'; key = today; title = title.replace(/每天|每日/, ' '); }
     else if (weekly) {
@@ -41,8 +51,9 @@ export class QuickEntryService {
       }
     }
     title = title.replace(/\s+/g, ' ').trim();
+    if (startMinute >= 0 && key.length === 0) { key = today; }
     if (title.length === 0) { throw new Error('还需要输入任务内容，例如：明天交报告 #学习'); }
     return { title: title, note: '', priority: priority, tagsText: tags.map((tag: string) => tag.slice(1)).join(','),
-      dueAt: key.length > 0 ? ScheduleService.end(key) : 0, repeat: repeat };
+      dueAt: key.length > 0 ? ScheduleService.end(key) : 0, repeat: repeat, startMinute: startMinute, durationMinutes: durationMinutes };
   }
 }

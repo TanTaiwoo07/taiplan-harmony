@@ -12,6 +12,10 @@ export interface Task extends LegacyTask {
   dueAt: number; // 本地截止日期的当天末尾；0 表示未设置
   repeat: string; // none / daily / weekly / monthly
   sortOrder: number;
+  startMinute?: number; // -1 全天，否则本地 00:00 起的分钟数
+  durationMinutes?: number;
+  steps?: string[];
+  doneSteps?: number[]; // 普通任务的步骤进度；重复任务使用日期状态
 }
 export interface LegacyDocument { version: number; tasks: LegacyTask[]; }
 export interface TaskDraft {
@@ -21,6 +25,9 @@ export interface TaskDraft {
   tagsText: string;
   dueAt: number;
   repeat?: string;
+  startMinute?: number;
+  durationMinutes?: number;
+  stepsText?: string;
 }
 
 export interface OccurrenceState {
@@ -29,6 +36,7 @@ export interface OccurrenceState {
   completed: boolean;
   skipped: boolean;
   updatedAt: number;
+  doneSteps?: number[];
 }
 
 export interface TaskItem {
@@ -37,7 +45,10 @@ export interface TaskItem {
   dateKey: string;
   dueAt: number;
   completed: boolean;
+  doneSteps?: number[];
 }
+
+export interface TimeConflict { title: string; dateKey: string; time: string; }
 
 export interface CalendarDay {
   key: string;

@@ -2,6 +2,32 @@ import { LegacyDocument, LegacyTask, Task, TaskDraft } from '../model/Task';
 
 // 纯业务函数不依赖 ArkUI 或数据库，跨平台可用相同案例验证。
 export class TaskService {
+  static parseSteps(text: string): string[] {
+    const steps = text.split('\n').map((line: string) => line.trim()).filter((line: string) => line.length > 0);
+    if (steps.length > 20 || steps.some((line: string) => line.length > 100)) { throw new Error('子任务最多 20 项，每项最多 100 字'); }
+    return steps;
+  }
+  static minuteLabel(minute: number): string {
+    return `${Math.floor(minute / 60).toString().padStart(2, '0')}:${(minute % 60).toString().padStart(2, '0')}`;
+  }
+  static timeLabel(task: Task): string {
+    const start = task.startMinute ?? -1;
+    return start < 0 ? '全天' : `${TaskService.minuteLabel(start)}–${TaskService.minuteLabel(start + (task.durationMinutes ?? 30))}`;
+  }
+  static deadline(task: Task, day: number): number {
+    if (day === 0 || (task.startMinute ?? -1) < 0) { return day; }
+    const date = new Date(day);
+    date.setHours(0, (task.startMinute ?? 0) + (task.durationMinutes ?? 30), 0, 0);
+    return date.getTime();
+  }
+  static toggleStep(done: number[], index: number, count: number): number[] {
+    if (!Number.isInteger(index) || index < 0 || index >= count) { throw new Error('子任务不存在'); }
+    return done.includes(index) ? done.filter((value: number) => value !== index) : done.concat([index]).sort((a: number, b: number) => a - b);
+  }
+  static validateDone(done: number[], count: number): void {
+    if (!Array.isArray(done) || done.some((index: number) => !Number.isInteger(index) || index < 0 || index >= count) ||
+      new Set<number>(done).size !== done.length) { throw new Error('子任务进度无效'); }
+  }
   static parseTags(text: string): string[] {
     const tags: string[] = [];
     for (const part of text.split(/[,，、\n]/)) {
@@ -22,22 +48,35 @@ export class TaskService {
     const repeat = draft.repeat ?? 'none';
     if (!['none', 'daily', 'weekly', 'monthly'].includes(repeat)) { throw new Error('重复规则无效'); }
     if (repeat !== 'none' && draft.dueAt === 0) { throw new Error('请先选择重复任务的起始日期'); }
+    const start = draft.startMinute ?? -1;
+    const duration = draft.durationMinutes ?? 30;
+    if (!Number.isInteger(start) || start < -1 || start > 1439 || !Number.isInteger(duration) || duration < 5 || duration > 1440) {
+      throw new Error('开始时间无效，时长需为 5～1440 分钟');
+    }
+    if (start >= 0 && (draft.dueAt === 0 || start + duration > 1440)) { throw new Error('请先选择日期，且时间安排不能跨过当天 24:00'); }
     return { id: id, title: title, note: draft.note.trim(), completed: false,
       createdAt: now, updatedAt: now, priority: draft.priority,
-      tags: TaskService.parseTags(draft.tagsText), dueAt: draft.dueAt, repeat: repeat, sortOrder: -now };
+      tags: TaskService.parseTags(draft.tagsText), dueAt: draft.dueAt, repeat: repeat, sortOrder: -now,
+      startMinute: start, durationMinutes: duration, steps: TaskService.parseSteps(draft.stepsText ?? ''), doneSteps: [] };
   }
   static edit(task: Task, draft: TaskDraft, now: number): Task {
     const next = TaskService.create(draft, task.id, task.createdAt);
     next.completed = task.completed;
     next.updatedAt = now;
     next.sortOrder = task.sortOrder;
-    if (next.repeat !== 'none') { next.completed = false; }
+    if (JSON.stringify(next.steps) === JSON.stringify(task.steps ?? [])) { next.doneSteps = (task.doneSteps ?? []).slice(); }
+    if (next.repeat !== 'none') { next.completed = false; next.doneSteps = []; }
     return next;
   }
   static toggle(task: Task, now: number): Task {
-    return { id: task.id, title: task.title, note: task.note, completed: !task.completed,
+    return TaskService.withCompletion(task, !task.completed, now);
+  }
+  static withCompletion(task: Task, completed: boolean, now: number): Task {
+    return { id: task.id, title: task.title, note: task.note, completed: completed,
       createdAt: task.createdAt, updatedAt: now, priority: task.priority,
-      tags: task.tags.slice(), dueAt: task.dueAt, repeat: task.repeat, sortOrder: task.sortOrder };
+      tags: task.tags.slice(), dueAt: task.dueAt, repeat: task.repeat, sortOrder: task.sortOrder,
+      startMinute: task.startMinute ?? -1, durationMinutes: task.durationMinutes ?? 30,
+      steps: (task.steps ?? []).slice(), doneSteps: (task.doneSteps ?? []).slice() };
   }
   static section(tasks: Task[], completed: boolean, query: string = '', tag: string = ''): Task[] {
     const keyword = query.trim().toLocaleLowerCase();
@@ -63,7 +102,7 @@ export class TaskService {
     return new Date(year, month, day, 23, 59, 59, 999).getTime();
   }
   static isOverdue(task: Task, now: number): boolean {
-    return !task.completed && task.dueAt > 0 && task.dueAt < now;
+    return !task.completed && task.dueAt > 0 && TaskService.deadline(task, task.dueAt) < now;
   }
   static migrateLegacy(raw: string): Task[] {
     if (raw.length === 0) { return []; }

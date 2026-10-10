@@ -1,10 +1,11 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
-import { BackupDocument, CalendarDay, OccurrenceState, Task, TaskDraft, TaskItem } from '../model/Task';
+import { BackupDocument, CalendarDay, OccurrenceState, Task, TaskDraft, TaskItem, TimeConflict } from '../model/Task';
 import { TaskService } from '../services/TaskService';
 import { ScheduleService } from '../services/ScheduleService';
 import { QuickEntryService } from '../services/QuickEntryService';
 import { BackupService } from '../services/BackupService';
+import { IcsService } from '../services/IcsService';
 import { TaskRepository } from '../data/TaskRepository';
 import { BackupFiles } from '../data/BackupFiles';
 import { TaskCard } from '../components/TaskCard';
@@ -28,6 +29,12 @@ struct Index {
   @State private draftTags: string = '';
   @State private draftDueAt: number = 0;
   @State private draftRepeat: string = 'none';
+  @State private draftStart: number = -1;
+  @State private draftDuration: string = '30';
+  @State private draftSteps: string = '';
+  @State private batchRows: TaskItem[] = [];
+  @State private batchKeys: string[] = [];
+  @State private expandedKeys: string[] = [];
   @State private quickText: string = '';
   @State private query: string = '';
   @State private tagFilter: string = '';
@@ -38,6 +45,7 @@ struct Index {
   @State private month: string = ScheduleService.key(Date.now()).slice(0, 7) + '-01';
   @State private now: number = Date.now();
   @State private importSummary: string = '';
+  @State private importNotes: string = '';
   private pendingImport: BackupDocument | undefined = undefined;
   private repository: TaskRepository = new TaskRepository();
   private scroller: Scroller = new Scroller();
@@ -83,6 +91,9 @@ struct Index {
     this.draftTags = task ? task.tags.join('，') : '';
     this.draftDueAt = task ? task.dueAt : this.view === 'calendar' ? ScheduleService.end(this.selectedDay) : 0;
     this.draftRepeat = task ? task.repeat : 'none';
+    this.draftStart = task?.startMinute ?? -1;
+    this.draftDuration = (task?.durationMinutes ?? 30).toString();
+    this.draftSteps = (task?.steps ?? []).join('\n');
     this.changeMode('editor');
   }
   private parseQuick(): void {
@@ -92,6 +103,7 @@ struct Index {
       this.openEditor();
       this.draftTitle = draft.title; this.draftNote = draft.note; this.draftPriority = draft.priority;
       this.draftTags = draft.tagsText; this.draftDueAt = draft.dueAt; this.draftRepeat = draft.repeat ?? 'none';
+      this.draftStart = draft.startMinute ?? -1; this.draftDuration = (draft.durationMinutes ?? 30).toString();
       this.notice = '已识别为草稿，请核对后保存。';
     } catch (error) { this.error = (error as Error).message; }
   }
@@ -110,16 +122,29 @@ struct Index {
   private saveEditor(): void {
     if (this.busy) { return; }
     const draft: TaskDraft = { title: this.draftTitle, note: this.draftNote, priority: this.draftPriority,
-      tagsText: this.draftTags, dueAt: this.draftDueAt, repeat: this.draftRepeat };
+      tagsText: this.draftTags, dueAt: this.draftDueAt, repeat: this.draftRepeat,
+      startMinute: this.draftStart, durationMinutes: Number(this.draftDuration), stepsText: this.draftSteps };
     try {
       const old = this.tasks.find((task: Task) => task.id === this.editingId);
       if (this.editingId.length > 0 && !old) { this.error = '任务已不存在，请返回列表'; return; }
       const task = old ? TaskService.edit(old, draft, Date.now()) : TaskService.create(draft, util.generateRandomUUID(), Date.now());
+      const warnings: string[] = [];
       if (old && (old.repeat !== task.repeat || old.dueAt !== task.dueAt) && this.states.some((state: OccurrenceState) => state.taskId === old.id)) {
+        warnings.push('起始日期或重复规则变更将重置这一组的完成、跳过和子任务进度。');
+      } else if (old && JSON.stringify(old.steps ?? []) !== JSON.stringify(task.steps ?? []) &&
+        ((old.doneSteps ?? []).length > 0 || this.states.some((state: OccurrenceState) => state.taskId === old.id && (state.doneSteps ?? []).length > 0))) {
+        warnings.push('子任务清单发生变化，将重置子任务勾选进度，保留任务完成状态。');
+      }
+      const conflicts = ScheduleService.conflicts(task, this.tasks, this.states, Date.now());
+      if (conflicts.length > 0) {
+        warnings.push('以下未完成任务时间重叠（重复任务检查起始日或今天起 30 天，最多列出 5 条）：\n' +
+          conflicts.map((item: TimeConflict) => `${item.dateKey} ${item.time} ${item.title}`).join('\n'));
+      }
+      if (warnings.length > 0) {
         this.getUIContext().showAlertDialog({
-          title: '更新重复规则？', message: '起始日期或规则变更会重置这一组的完成和跳过记录。',
+          title: '保存前确认', message: warnings.join('\n\n'),
           primaryButton: { value: '取消', action: () => {} },
-          secondaryButton: { value: '更新规则', action: () => { this.persistEditor(task); } }
+          secondaryButton: { value: '仍然保存', action: () => { this.persistEditor(task); } }
         });
       } else { this.persistEditor(task); }
     } catch (error) { this.error = (error as Error).message; }
@@ -130,7 +155,7 @@ struct Index {
     try {
       if (item.task.repeat === 'none') { await this.repository.save(TaskService.toggle(item.task, Date.now())); }
       else { await this.repository.setOccurrence({ taskId: item.task.id, dateKey: item.dateKey,
-        completed: !item.completed, skipped: false, updatedAt: Date.now() }); }
+        completed: !item.completed, skipped: false, updatedAt: Date.now(), doneSteps: item.doneSteps ?? [] }); }
       await this.refreshData();
     } catch { this.error = '完成状态保存失败，请重试'; }
     finally { this.busy = false; }
@@ -139,7 +164,7 @@ struct Index {
     if (this.busy) { return; }
     this.busy = true;
     try {
-      await this.repository.setOccurrence({ taskId: item.task.id, dateKey: item.dateKey, completed: false, skipped: true, updatedAt: Date.now() });
+      await this.repository.setOccurrence({ taskId: item.task.id, dateKey: item.dateKey, completed: false, skipped: true, updatedAt: Date.now(), doneSteps: item.doneSteps ?? [] });
       await this.refreshData(); this.notice = '已跳过这一次，可在工具中恢复';
     } catch { this.error = '跳过失败，请重试'; }
     finally { this.busy = false; }
@@ -148,7 +173,7 @@ struct Index {
     if (this.busy) { return; }
     this.busy = true;
     try {
-      await this.repository.setOccurrence({ taskId: state.taskId, dateKey: state.dateKey, completed: false, skipped: false, updatedAt: Date.now() });
+      await this.repository.setOccurrence({ taskId: state.taskId, dateKey: state.dateKey, completed: false, skipped: false, updatedAt: Date.now(), doneSteps: state.doneSteps ?? [] });
       await this.refreshData(); this.notice = '已恢复这一次任务';
     } catch { this.error = '恢复失败，请重试'; }
     finally { this.busy = false; }
@@ -159,6 +184,61 @@ struct Index {
     try { await this.repository.remove(id); await this.refreshData(); }
     catch { this.error = '删除失败，请重试'; }
     finally { this.busy = false; }
+  }
+  private copyTask(task: Task): void {
+    this.openEditor(task); this.editingId = '';
+    this.draftTitle = (task.title + '（副本）').slice(0, 100);
+    this.notice = '已复制为新草稿，完成和子任务进度从头开始。';
+  }
+  private async toggleStep(item: TaskItem, index: number): Promise<void> {
+    if (this.busy) { return; }
+    this.busy = true; this.error = '';
+    try {
+      const done = TaskService.toggleStep(item.doneSteps ?? [], index, (item.task.steps ?? []).length);
+      if (item.task.repeat === 'none') {
+        const task = TaskService.withCompletion(item.task, item.completed, Date.now());
+        task.doneSteps = done;
+        await this.repository.save(task);
+      } else {
+        await this.repository.setOccurrence({ taskId: item.task.id, dateKey: item.dateKey,
+          completed: item.completed, skipped: false, updatedAt: Date.now(), doneSteps: done });
+      }
+      await this.refreshData();
+    } catch { this.error = '子任务进度保存失败，请重试'; }
+    finally { this.busy = false; }
+  }
+  private openBatch(): void {
+    this.batchRows = this.items(false).concat(this.items(true)); this.batchKeys = [];
+    this.changeMode('batch');
+  }
+  private selectBatch(key: string): void {
+    this.batchKeys = this.batchKeys.includes(key) ? this.batchKeys.filter((item: string) => item !== key) : this.batchKeys.concat([key]);
+  }
+  private async applyBatch(completed: boolean): Promise<void> {
+    if (this.busy || this.batchKeys.length === 0) { return; }
+    this.busy = true; this.error = '';
+    try {
+      const rows = this.batchRows.filter((item: TaskItem) => this.batchKeys.includes(item.key));
+      await this.repository.setCompleted(rows, completed, Date.now());
+      await this.refreshData(); this.changeMode('list');
+      this.notice = `已将 ${rows.length} 项标记为${completed ? '完成' : '待办'}`;
+    } catch { this.error = '批量更新失败，本次修改已回滚'; }
+    finally { this.busy = false; }
+  }
+  private todaySummary(): string {
+    const rows = ScheduleService.project(this.tasks, this.states, 'today', '', this.now);
+    const done = rows.filter((item: TaskItem) => item.completed).length;
+    const overdue = rows.filter((item: TaskItem) => !item.completed && TaskService.deadline(item.task, item.dueAt) < this.now).length;
+    return `今天与逾期事项 ${rows.length} 项 · 已完成 ${done} · 逾期 ${overdue}`;
+  }
+  private pickTime(): void {
+    const selected = new Date();
+    selected.setHours(this.draftStart < 0 ? 9 : Math.floor(this.draftStart / 60), this.draftStart < 0 ? 0 : this.draftStart % 60, 0, 0);
+    this.getUIContext().showTimePickerDialog({ selected: selected, useMilitaryTime: true,
+      onAccept: (value: TimePickerResult) => {
+        this.draftStart = value.hour * 60 + value.minute;
+        if (this.draftDueAt === 0) { this.draftDueAt = ScheduleService.end(ScheduleService.key(Date.now())); }
+      } });
   }
   private remove(item: TaskItem): void {
     if (item.task.repeat === 'none') {
@@ -204,12 +284,18 @@ struct Index {
   private async switchSort(): Promise<void> {
     if (this.busy) { return; }
     this.busy = true;
-    const next = this.sortMode === 'manual' ? 'created' : 'manual';
+    const modes = ['created', 'time', 'priority', 'manual'];
+    const next = modes[(modes.indexOf(this.sortMode) + 1) % modes.length];
     try { await this.repository.setSortMode(next); this.sortMode = next; }
     catch { this.error = '排序设置保存失败'; }
     finally { this.busy = false; }
   }
   private openSort(): void { this.sortDraft = ScheduleService.ordered(this.tasks); this.changeMode('sort'); }
+  private sortIndex(id: string): number { return this.sortDraft.findIndex((task: Task) => task.id === id); }
+  private shiftSort(id: string, delta: number): void {
+    const index = this.sortIndex(id);
+    this.sortDraft = ScheduleService.move(this.sortDraft, index, index + delta);
+  }
   private async saveSort(): Promise<void> {
     if (this.busy) { return; }
     this.busy = true;
@@ -230,7 +316,7 @@ struct Index {
   }
   private async chooseBackup(): Promise<void> {
     if (this.busy) { return; }
-    this.busy = true; this.error = ''; this.notice = ''; this.pendingImport = undefined; this.importSummary = '';
+    this.busy = true; this.error = ''; this.notice = ''; this.pendingImport = undefined; this.importSummary = ''; this.importNotes = '';
     try {
       const raw = await BackupFiles.importFile(this.context());
       if (raw === undefined) { return; }
@@ -239,6 +325,29 @@ struct Index {
       this.pendingImport = doc;
       this.importSummary = `文件中共 ${doc.tasks.length} 个任务，将新增 ${count} 个。已有的 ${doc.tasks.length - count} 个同 ID 任务保持现状。`;
     } catch (error) { this.error = '无法导入：' + (error as Error).message; }
+    finally { this.busy = false; }
+  }
+  private async chooseCalendar(): Promise<void> {
+    if (this.busy) { return; }
+    this.busy = true; this.error = ''; this.notice = ''; this.pendingImport = undefined; this.importSummary = ''; this.importNotes = '';
+    try {
+      const raw = await BackupFiles.importFile(this.context(), 'ics');
+      if (raw === undefined) { return; }
+      const report = IcsService.parse(raw, Date.now());
+      this.pendingImport = BackupService.decode(JSON.stringify(report.document));
+      const count = report.document.tasks.filter((task: Task) => !this.tasks.some((current: Task) => current.id === task.id)).length;
+      this.importSummary = `日历共 ${report.total} 条事件，可识别 ${report.document.tasks.length} 条，将新增 ${count} 个任务。已有 UID 保留本机版本。`;
+      this.importNotes = report.notes.join('\n');
+    } catch (error) { this.error = '日历读取失败：' + (error as Error).message; }
+    finally { this.busy = false; }
+  }
+  private async exportCalendar(): Promise<void> {
+    if (this.busy) { return; }
+    this.busy = true; this.error = ''; this.notice = '';
+    try {
+      const raw = IcsService.exportMonth(this.tasks, this.states, Date.now());
+      if (await BackupFiles.exportFile(this.context(), raw, 'ics')) { this.notice = '已导出今天起 30 天日历快照'; }
+    } catch (error) { this.error = '日历导出失败：' + (error as Error).message; }
     finally { this.busy = false; }
   }
   private async confirmImport(): Promise<void> {
@@ -253,7 +362,7 @@ struct Index {
   }
   private items(completed: boolean): TaskItem[] {
     return ScheduleService.filter(ScheduleService.project(this.tasks, this.states, this.view, this.selectedDay, this.now),
-      completed, this.query, this.tagFilter, this.sortMode === 'manual');
+      completed, this.query, this.tagFilter, this.sortMode);
   }
   private calendarDays(): CalendarDay[] {
     const keyword = this.query.trim().toLocaleLowerCase();
@@ -279,8 +388,12 @@ struct Index {
     }
     ForEach(this.items(completed), (item: TaskItem) => {
       TaskCard({ task: item.task, completed: item.completed, displayDueAt: item.dueAt, busy: this.busy, now: this.now,
+        expanded: this.expandedKeys.includes(item.key), onExpand: () => {
+          this.expandedKeys = this.expandedKeys.includes(item.key) ? this.expandedKeys.filter((key: string) => key !== item.key) : this.expandedKeys.concat([item.key]);
+        },
+        doneSteps: item.doneSteps ?? [], onStep: (index: number) => this.toggleStep(item, index), onCopy: () => this.copyTask(item.task),
         onToggle: () => this.toggle(item), onEdit: () => this.openEditor(item.task), onRemove: () => this.remove(item) })
-    }, (item: TaskItem) => item.key)
+    }, (item: TaskItem) => ScheduleService.renderKey(item))
   }
 
   @Builder
@@ -314,9 +427,11 @@ struct Index {
       Text(this.view === 'future' ? '未来 30 天' : this.view === 'today' ? '今日事项 + 未完成的逾期任务' :
         this.view === 'calendar' ? this.selectedDay : '重复任务显示今天或下一次').fontSize(11)
         .fontColor($r('app.color.text_secondary')).layoutWeight(1)
-      Button(this.sortMode === 'manual' ? '手动顺序' : '创建倒序').fontSize(11).height(28)
+      Button(ScheduleService.sortLabel(this.sortMode)).fontSize(11).height(28)
         .padding({ left: 6, right: 6 }).backgroundColor(Color.Transparent).fontColor($r('app.color.accent'))
         .enabled(!this.busy).onClick(() => this.switchSort())
+      Button('多选').fontSize(11).height(28).padding({ left: 6, right: 0 }).backgroundColor(Color.Transparent)
+        .fontColor($r('app.color.accent')).enabled(!this.busy).onClick(() => this.openBatch())
     }.width('100%')
   }
 
@@ -363,12 +478,37 @@ struct Index {
           .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent')).onClick(() => this.pickDate())
         if (this.draftDueAt > 0) {
           Button('清除').height(44).fontSize(12).backgroundColor($r('app.color.card_background'))
-            .fontColor($r('app.color.text_secondary')).onClick(() => { this.draftDueAt = 0; })
+            .fontColor($r('app.color.text_secondary')).onClick(() => { this.draftDueAt = 0; this.draftStart = -1; })
         }
       }
       if (this.draftRepeat === 'monthly') {
         Text('每月按起始日重复，月份没有该日时取当月最后一天。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       }
+      Text('时间安排').fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
+      Row({ space: 8 }) {
+        Button(this.draftStart < 0 ? '全天 · 点击设置时间' : `开始 ${TaskService.minuteLabel(this.draftStart)}`)
+          .layoutWeight(1).height(44).fontSize(13).backgroundColor($r('app.color.card_background'))
+          .fontColor($r('app.color.accent')).onClick(() => this.pickTime())
+        if (this.draftStart >= 0) {
+          Button('改为全天').height(44).fontSize(12).backgroundColor($r('app.color.card_background'))
+            .fontColor($r('app.color.text_secondary')).onClick(() => { this.draftStart = -1; })
+        }
+      }.width('100%')
+      if (this.draftStart >= 0) {
+        Row({ space: 8 }) {
+          Text('时长（分钟）').fontSize(13).fontColor($r('app.color.text_secondary'))
+          TextInput({ text: this.draftDuration, placeholder: '例如 30' }).type(InputType.Number).maxLength(4)
+            .layoutWeight(1).height(44).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+            .onChange((value: string) => { this.draftDuration = value; })
+        }
+        Text('保存时检查时间冲突；时段结束后计为逾期。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      }
+      Text('子任务 · 每行一项，最多 20 项').fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
+      TextArea({ text: this.draftSteps, placeholder: '例如：\n整理资料\n完成初稿\n检查并提交' }).height(140).maxLength(2020)
+        .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+        .onChange((value: string) => { this.draftSteps = value; })
+      Text('子任务可在卡片展开勾选；任务完成由你单独确认。重复任务每天独立记录子任务进度。')
+        .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
     }.width('100%').padding({ top: 8 }).enabled(!this.busy)
   }
 
@@ -376,12 +516,12 @@ struct Index {
   quickEditor() {
     Column({ space: 16 }) {
       Text('一句话记任务').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
-      Text('例如：明天 交报告 #学习 高优先级\n或：每周一 复习英语 #学习')
+      Text('例如：明天 14:30 交报告 用时60分钟 #学习\n或：每周一 复习英语 #学习 高优先级')
         .fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
       TextArea({ text: this.quickText, placeholder: '输入任务，先识别，再确认保存' }).height(150).maxLength(300)
         .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
         .onChange((value: string) => { this.quickText = value; })
-      Text('支持今天、明天、后天、下周几、YYYY-MM-DD、每天／每周／每月、#标签及高／低优先级。日期精确到天，其他文字保留为标题。')
+      Text('支持今天、明天、后天、下周几、YYYY-MM-DD、每天／每周／每月、HH:mm、用时N分钟、#标签及高／低优先级。仅写时间时默认今天，其他文字保留为标题。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Button('识别并预览').height(46).width('100%').backgroundColor($r('app.color.accent'))
         .fontColor($r('app.color.on_accent')).onClick(() => this.parseQuick())
@@ -398,7 +538,15 @@ struct Index {
         .fontColor($r('app.color.accent')).onClick(() => this.exportBackup())
       Button('从文件恢复任务').width('100%').height(48).backgroundColor($r('app.color.card_background'))
         .fontColor($r('app.color.accent')).onClick(() => this.chooseBackup())
-      Text('备份包含任务、标签、顺序和重复完成记录。恢复时只合并新任务，已有同 ID 任务保留。')
+      Row({ space: 8 }) {
+        Button('导入 ICS 日历').layoutWeight(1).height(44).fontSize(13).padding(4)
+          .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent')).onClick(() => this.chooseCalendar())
+        Button('导出 30 天日历').layoutWeight(1).height(44).fontSize(13).padding(4)
+          .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent')).onClick(() => this.exportCalendar())
+      }.width('100%')
+      Text('ICS 导出为单次事件快照，包含今天起 30 天的有日期事项；不是完整备份。导入不支持的时区、跨日和重复规则会逐项报告。')
+        .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Text('备份包含任务、时间、子任务、标签、顺序和重复完成记录。兼容旧版备份；恢复时只合并新任务，已有同 ID 任务保留。')
         .fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
       if (this.importSummary.length > 0) {
         Text(this.importSummary).fontSize(14).fontColor($r('app.color.text_primary')).width('100%')
@@ -406,6 +554,9 @@ struct Index {
           .fontColor($r('app.color.on_accent')).onClick(() => this.confirmImport())
         Button('取消导入').backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_secondary'))
           .onClick(() => { this.pendingImport = undefined; this.importSummary = ''; })
+      }
+      if (this.importNotes.length > 0) {
+        Text('日历导入报告\n' + this.importNotes).fontSize(12).fontColor($r('app.color.danger')).width('100%')
       }
       Text('已跳过的重复事项').fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
       if (!this.states.some((state: OccurrenceState) => state.skipped)) {
@@ -423,6 +574,34 @@ struct Index {
   }
 
   @Builder
+  batchPage() {
+    Column({ space: 12 }) {
+      Text('批量处理').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
+      Text('基于进入前的视图与筛选；重复任务只影响选中的日期。子任务进度保持不变。')
+        .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Row() {
+        Text(`已选 ${this.batchKeys.length} / ${this.batchRows.length} 项`).fontSize(14).layoutWeight(1).fontColor($r('app.color.text_primary'))
+        Button(this.batchKeys.length === this.batchRows.length && this.batchRows.length > 0 ? '清空选择' : '全选')
+          .height(34).fontSize(12).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent'))
+          .onClick(() => { this.batchKeys = this.batchKeys.length === this.batchRows.length ? [] : this.batchRows.map((item: TaskItem) => item.key); })
+      }.width('100%')
+      if (this.batchRows.length === 0) { Text('当前视图没有任务').fontColor($r('app.color.text_secondary')) }
+      ForEach(this.batchRows, (item: TaskItem) => {
+        Row({ space: 10 }) {
+          Checkbox({ name: item.key }).select(this.batchKeys.includes(item.key)).selectedColor($r('app.color.accent'))
+            .accessibilityText(`选择 ${item.task.title} ${item.dateKey}`)
+            .onChange((selected: boolean) => { if (selected !== this.batchKeys.includes(item.key)) { this.selectBatch(item.key); } })
+          Column({ space: 6 }) {
+            Text(item.task.title).fontSize(16).fontColor($r('app.color.text_primary')).width('100%')
+            Text(`${item.completed ? '已完成' : '待办'} · ${item.dateKey || '无日期'} · ${TaskService.timeLabel(item.task)}`)
+              .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+          }.layoutWeight(1)
+        }.padding(14).width('100%').borderRadius(16).backgroundColor($r('app.color.card_background'))
+      }, (item: TaskItem) => item.key)
+    }.width('100%').enabled(!this.busy)
+  }
+
+  @Builder
   sortingPage() {
     Column({ space: 10 }) {
       Text('长按任务拖动，也可点箭头微调').fontSize(15).fontColor($r('app.color.text_primary')).width('100%')
@@ -435,10 +614,10 @@ struct Index {
               Text(task.title).fontSize(15).layoutWeight(1).maxLines(2).fontColor($r('app.color.text_primary'))
               Button('↑').width(36).height(38).padding(0).fontSize(18).accessibilityText('上移任务')
                 .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent'))
-                .enabled(index > 0).onClick(() => { this.sortDraft = ScheduleService.move(this.sortDraft, index, index - 1); })
+                .enabled(this.sortIndex(task.id) > 0).onClick(() => this.shiftSort(task.id, -1))
               Button('↓').width(36).height(38).padding(0).fontSize(18).accessibilityText('下移任务')
-                .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).enabled(index < this.sortDraft.length - 1)
-                .onClick(() => { this.sortDraft = ScheduleService.move(this.sortDraft, index, index + 1); })
+                .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).enabled(this.sortIndex(task.id) < this.sortDraft.length - 1)
+                .onClick(() => this.shiftSort(task.id, 1))
             }.padding(14).height(80).width('100%').borderRadius(16).backgroundColor($r('app.color.card_background'))
           }
         }, (task: Task) => task.id).onMove((from: number, to: number) => { this.sortDraft = ScheduleService.move(this.sortDraft, from, to); })
@@ -478,7 +657,12 @@ struct Index {
               if (this.mode === 'editor') { this.editor() }
               else if (this.mode === 'quick') { this.quickEditor() }
               else if (this.mode === 'tools') { this.toolsPage() }
+              else if (this.mode === 'batch') { this.batchPage() }
               else {
+                if (this.view === 'all' || this.view === 'today') {
+                  Text(this.todaySummary()).fontSize(12).fontColor($r('app.color.accent')).width('100%')
+                    .padding(12).borderRadius(12).backgroundColor($r('app.color.card_background'))
+                }
                 if (this.view === 'calendar') {
                   MonthCalendar({ days: this.calendarDays(), selected: this.selectedDay, month: this.month,
                     onSelect: (key: string) => { this.selectedDay = key; },
@@ -491,7 +675,16 @@ struct Index {
             }.width('100%').padding({ bottom: 20 })
           }.layoutWeight(1).width('100%').align(Alignment.Top)
         }
-        if (this.mode === 'editor' || this.mode === 'sort') {
+        if (this.mode === 'batch') {
+          Row({ space: 6 }) {
+            Button('取消').height(48).fontSize(13).padding({ left: 12, right: 12 }).backgroundColor($r('app.color.card_background'))
+              .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
+            Button('设为待办').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.card_background'))
+              .fontColor($r('app.color.accent')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(false))
+            Button('设为完成').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.accent'))
+              .fontColor($r('app.color.on_accent')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(true))
+          }.width('100%').enabled(!this.busy)
+        } else if (this.mode === 'editor' || this.mode === 'sort') {
           Row({ space: 10 }) {
             Button('取消').layoutWeight(1).height(48).backgroundColor($r('app.color.card_background'))
               .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
