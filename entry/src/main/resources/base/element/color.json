@@ -2,7 +2,7 @@
   "color": [
     {
       "name": "page_background",
-      "value": "#F5F6F2"
+      "value": "#F4F4F5"
     },
     {
       "name": "card_background",
@@ -10,23 +10,27 @@
     },
     {
       "name": "text_primary",
-      "value": "#20362E"
+      "value": "#18181B"
     },
     {
       "name": "text_secondary",
-      "value": "#65776D"
+      "value": "#71717A"
     },
     {
       "name": "accent",
-      "value": "#236B59"
+      "value": "#242427"
     },
     {
       "name": "danger",
-      "value": "#A53525"
+      "value": "#C83C3C"
     },
     {
       "name": "on_accent",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "chip_background",
+      "value": "#EEEEF0"
     }
   ]
 }

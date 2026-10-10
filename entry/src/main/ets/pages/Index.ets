@@ -6,6 +6,7 @@ import { ScheduleService } from '../services/ScheduleService';
 import { QuickEntryService } from '../services/QuickEntryService';
 import { BackupService } from '../services/BackupService';
 import { IcsService } from '../services/IcsService';
+import { DayOverview, FocusService } from '../services/FocusService';
 import { TaskRepository } from '../data/TaskRepository';
 import { BackupFiles } from '../data/BackupFiles';
 import { TaskCard } from '../components/TaskCard';
@@ -21,6 +22,10 @@ struct Index {
   @State private error: string = '';
   @State private notice: string = '';
   @State private mode: string = 'list';
+  @State private selectedTab: number = 0;
+  @State private showFilters: boolean = false;
+  @State private showHomeDone: boolean = false;
+  @State private undoTitle: string = '';
   @State private view: string = 'all';
   @State private editingId: string = '';
   @State private draftTitle: string = '';
@@ -47,6 +52,7 @@ struct Index {
   @State private importSummary: string = '';
   @State private importNotes: string = '';
   private pendingImport: BackupDocument | undefined = undefined;
+  private deletedBackup: BackupDocument | undefined = undefined;
   private repository: TaskRepository = new TaskRepository();
   private scroller: Scroller = new Scroller();
   private clockId: number = -1;
@@ -89,7 +95,8 @@ struct Index {
     this.draftNote = task ? task.note : '';
     this.draftPriority = task ? task.priority : 1;
     this.draftTags = task ? task.tags.join('，') : '';
-    this.draftDueAt = task ? task.dueAt : this.view === 'calendar' ? ScheduleService.end(this.selectedDay) : 0;
+    this.draftDueAt = task ? task.dueAt : this.selectedTab === 2 ? ScheduleService.end(this.selectedDay) :
+      this.selectedTab === 0 ? ScheduleService.end(ScheduleService.key(Date.now())) : 0;
     this.draftRepeat = task ? task.repeat : 'none';
     this.draftStart = task?.startMinute ?? -1;
     this.draftDuration = (task?.durationMinutes ?? 30).toString();
@@ -115,6 +122,7 @@ struct Index {
       await this.refreshData();
       this.query = ''; this.tagFilter = '';
       this.changeMode('list'); this.view = 'all';
+      if (this.selectedTab === 0 && task.dueAt === 0 && task.priority !== 2) { this.selectedTab = 1; }
       this.notice = '任务已保存';
     } catch { this.error = '保存失败，请重试。编辑内容仍然保留。'; }
     finally { this.busy = false; }
@@ -181,8 +189,26 @@ struct Index {
   private async deleteTask(id: string): Promise<void> {
     if (this.busy) { return; }
     this.busy = true;
-    try { await this.repository.remove(id); await this.refreshData(); }
-    catch { this.error = '删除失败，请重试'; }
+    let removed = false;
+    try {
+      const task = this.tasks.find((item: Task) => item.id === id);
+      if (!task) { throw new Error('任务已不存在'); }
+      const snapshot = BackupService.decode(BackupService.encode([task], this.states.filter((state: OccurrenceState) => state.taskId === id), Date.now()));
+      await this.repository.remove(id);
+      removed = true;
+      this.deletedBackup = snapshot; this.undoTitle = task.title;
+      await this.refreshData();
+    }
+    catch { this.error = removed ? '任务已删除，但列表刷新失败；可撤销或重新启动应用。' : '删除失败，请重试'; }
+    finally { this.busy = false; }
+  }
+  private async undoDelete(): Promise<void> {
+    if (this.busy || !this.deletedBackup) { return; }
+    this.busy = true; this.error = '';
+    try {
+      await this.repository.mergeBackup(this.deletedBackup);
+      await this.refreshData(); this.deletedBackup = undefined; this.undoTitle = ''; this.notice = '任务及原有进度已恢复';
+    } catch { this.error = '撤销失败，可重试'; }
     finally { this.busy = false; }
   }
   private copyTask(task: Task): void {
@@ -273,9 +299,8 @@ struct Index {
     if (date.getFullYear() < 2000 || date.getFullYear() > 2100) { return; }
     this.month = ScheduleService.key(date.getTime()); this.selectedDay = this.month;
   }
-  private async switchTheme(): Promise<void> {
+  private async selectTheme(next: string): Promise<void> {
     if (this.busy) { return; }
-    const next = this.theme === 'system' ? 'light' : this.theme === 'light' ? 'dark' : 'system';
     this.busy = true;
     try { await this.repository.setTheme(this.context(), next); this.theme = next; }
     catch { this.error = '主题保存失败，请重试'; }
@@ -360,33 +385,38 @@ struct Index {
     } catch { this.error = '导入失败，数据已回滚，请重试'; }
     finally { this.busy = false; }
   }
-  private items(completed: boolean): TaskItem[] {
-    return ScheduleService.filter(ScheduleService.project(this.tasks, this.states, this.view, this.selectedDay, this.now),
-      completed, this.query, this.tagFilter, this.sortMode);
+  private items(completed: boolean, page: number = this.selectedTab): TaskItem[] {
+    const view = page === 0 ? 'today' : page === 2 ? 'calendar' : this.view;
+    return ScheduleService.filter(ScheduleService.project(this.tasks, this.states, view, this.selectedDay, this.now),
+      completed, page === 1 ? this.query : '', page === 1 ? this.tagFilter : '', page === 2 ? 'time' : this.sortMode);
+  }
+  private overview(): DayOverview { return FocusService.overview(this.tasks, this.states, this.now); }
+  private tabTitle(page: number): string { return ['今天', '待办', '日历', '设置'][page]; }
+  private dateTitle(): string {
+    const date = new Date(this.now);
+    return `${date.getMonth() + 1}月${date.getDate()}日 · 星期${['日', '一', '二', '三', '四', '五', '六'][date.getDay()]}`;
+  }
+  private pageTitle(): string {
+    return this.mode === 'list' ? this.tabTitle(this.selectedTab) : this.mode === 'editor' ? (this.editingId ? '编辑任务' : '新建任务') :
+      this.mode === 'quick' ? '快速添加' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
   }
   private calendarDays(): CalendarDay[] {
-    const keyword = this.query.trim().toLocaleLowerCase();
-    const tasks = this.tasks.filter((task: Task) => (this.tagFilter.length === 0 || task.tags.includes(this.tagFilter)) &&
-      (keyword.length === 0 || `${task.title} ${task.note} ${task.tags.join(' ')}`.toLocaleLowerCase().includes(keyword)));
-    return ScheduleService.month(tasks, this.states, this.month);
+    return ScheduleService.month(this.tasks, this.states, this.month);
   }
   onBackPress(): boolean {
     if (this.mode !== 'list') { if (!this.busy) { this.changeMode('list'); } return true; }
+    if (this.selectedTab !== 0) { this.selectedTab = 0; return true; }
     return false;
   }
 
+
+  private rows(completed: boolean, page: number, group: string): TaskItem[] {
+    return group === 'urgent' ? this.overview().urgent : group === 'remaining' ? this.overview().remaining : group === 'done' ? this.overview().done : this.items(completed, page);
+  }
+
   @Builder
-  section(completed: boolean, label: string) {
-    Row() {
-      Text(label).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
-      Blank()
-      Text(this.items(completed).length.toString()).fontSize(14).fontColor($r('app.color.text_secondary'))
-    }.width('100%').padding({ top: 14, bottom: 4 })
-    if (this.items(completed).length === 0) {
-      Text('当前视图没有符合条件的任务').fontSize(13).fontColor($r('app.color.text_secondary'))
-        .width('100%').padding({ top: 10, bottom: 18 })
-    }
-    ForEach(this.items(completed), (item: TaskItem) => {
+  taskRows(completed: boolean, page: number, group: string) {
+    ForEach(this.rows(completed, page, group), (item: TaskItem) => {
       TaskCard({ task: item.task, completed: item.completed, displayDueAt: item.dueAt, busy: this.busy, now: this.now,
         expanded: this.expandedKeys.includes(item.key), onExpand: () => {
           this.expandedKeys = this.expandedKeys.includes(item.key) ? this.expandedKeys.filter((key: string) => key !== item.key) : this.expandedKeys.concat([item.key]);
@@ -397,49 +427,157 @@ struct Index {
   }
 
   @Builder
-  filters() {
-    Row({ space: 6 }) {
-      ForEach(['all', 'today', 'future', 'calendar'], (view: string) => {
-        Button(view === 'all' ? '全部' : view === 'today' ? '今天' : view === 'future' ? '未来' : '月历')
-          .layoutWeight(1).height(34).fontSize(13)
-          .backgroundColor(this.view === view ? $r('app.color.accent') : $r('app.color.card_background'))
-          .fontColor(this.view === view ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
-          .onClick(() => this.changeView(view))
-      })
-    }.width('100%')
-    Search({ value: this.query, placeholder: '搜索标题、备注或标签' }).height(42)
-      .onChange((value: string) => { this.query = value; })
-      .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
-    Scroll() {
-      Row({ space: 8 }) {
-        Button('全部标签').height(30).fontSize(12)
-          .backgroundColor(this.tagFilter.length === 0 ? $r('app.color.accent') : $r('app.color.card_background'))
-          .fontColor(this.tagFilter.length === 0 ? $r('app.color.on_accent') : $r('app.color.text_secondary')).onClick(() => { this.tagFilter = ''; })
-        ForEach(TaskService.allTags(this.tasks), (tag: string) => {
-          Button(tag).height(30).fontSize(12)
-            .backgroundColor(this.tagFilter === tag ? $r('app.color.accent') : $r('app.color.card_background'))
-            .fontColor(this.tagFilter === tag ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
-            .onClick(() => { this.tagFilter = this.tagFilter === tag ? '' : tag; })
-        }, (tag: string) => tag)
-      }
-    }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).align(Alignment.Start)
+  section(completed: boolean, label: string, page: number) {
     Row() {
-      Text(this.view === 'future' ? '未来 30 天' : this.view === 'today' ? '今日事项 + 未完成的逾期任务' :
-        this.view === 'calendar' ? this.selectedDay : '重复任务显示今天或下一次').fontSize(11)
-        .fontColor($r('app.color.text_secondary')).layoutWeight(1)
-      Button(ScheduleService.sortLabel(this.sortMode)).fontSize(11).height(28)
-        .padding({ left: 6, right: 6 }).backgroundColor(Color.Transparent).fontColor($r('app.color.accent'))
-        .enabled(!this.busy).onClick(() => this.switchSort())
-      Button('多选').fontSize(11).height(28).padding({ left: 6, right: 0 }).backgroundColor(Color.Transparent)
-        .fontColor($r('app.color.accent')).enabled(!this.busy).onClick(() => this.openBatch())
+      Text(label).fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+      Blank()
+      Text(this.items(completed, page).length.toString()).fontSize(13).fontColor($r('app.color.text_secondary'))
+    }.width('100%').padding({ top: 14, bottom: 4 })
+    if (this.items(completed, page).length === 0) {
+      Text(completed ? '完成后的任务会出现在这里' : '没有符合条件的待办')
+        .fontSize(13).fontColor($r('app.color.text_secondary')).width('100%').padding({ top: 8, bottom: 12 })
+    }
+    this.taskRows(completed, page, '')
+  }
+
+  @Builder
+  filters() {
+    Row({ space: 8 }) {
+      Search({ value: this.query, placeholder: '搜索任务' }).height(44).layoutWeight(1)
+        .onChange((value: string) => { this.query = value; })
+        .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+      Button('筛选').height(44).fontSize(13).padding({ left: 12, right: 12 })
+        .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+        .onClick(() => { this.showFilters = !this.showFilters; })
     }.width('100%')
+    if (this.showFilters) {
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          ForEach(['all', 'future'], (view: string) => {
+            Button(view === 'all' ? '全部任务' : '未来 30 天').layoutWeight(1).height(40).fontSize(13)
+              .backgroundColor(this.view === view ? $r('app.color.accent') : $r('app.color.chip_background'))
+              .fontColor(this.view === view ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
+              .onClick(() => this.changeView(view))
+          })
+        }
+        Scroll() {
+          Row({ space: 8 }) {
+            Button('全部标签').height(40).fontSize(12)
+              .backgroundColor(this.tagFilter.length === 0 ? $r('app.color.accent') : $r('app.color.chip_background'))
+              .fontColor(this.tagFilter.length === 0 ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
+              .onClick(() => { this.tagFilter = ''; })
+            ForEach(TaskService.allTags(this.tasks), (tag: string) => {
+              Button(tag).height(40).fontSize(12)
+                .backgroundColor(this.tagFilter === tag ? $r('app.color.accent') : $r('app.color.chip_background'))
+                .fontColor(this.tagFilter === tag ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
+                .onClick(() => { this.tagFilter = this.tagFilter === tag ? '' : tag; })
+            }, (tag: string) => tag)
+          }
+        }.width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).align(Alignment.Start)
+        Row({ space: 8 }) {
+          Button(ScheduleService.sortLabel(this.sortMode)).layoutWeight(1).height(40).fontSize(12).padding(4)
+            .backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.switchSort())
+          Button('拖拽排序').layoutWeight(1).height(40).fontSize(12).padding(4)
+            .backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.openSort())
+          Button('多选').height(40).fontSize(12).padding({ left: 12, right: 12 })
+            .backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.openBatch())
+        }
+      }.padding(12).borderRadius(16).backgroundColor($r('app.color.card_background')).width('100%')
+    }
+    Text((this.view === 'future' ? '未来 30 天' : '全部任务') + (this.tagFilter ? ' · ' + this.tagFilter : '') + ' · ' + ScheduleService.sortLabel(this.sortMode))
+      .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+  }
+
+  @Builder
+  homePage() {
+    Column({ space: 12 }) {
+      Row({ space: 16 }) {
+        Column({ space: 6 }) {
+          Text('今天已完成').fontSize(13).fontColor($r('app.color.text_secondary'))
+          Text(this.overview().completed.toString() + ' / ' + this.overview().planned.toString())
+            .fontSize(34).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
+          Text(this.overview().planned > 0 && this.overview().completed === this.overview().planned ? '今日计划已全部完成' : '一步一步，完成今天的计划')
+            .fontSize(12).fontColor($r('app.color.text_secondary'))
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Column({ space: 6 }) {
+          Text(this.overview().overdue.toString()).fontSize(28).fontWeight(FontWeight.Medium)
+            .fontColor(this.overview().overdue > 0 ? $r('app.color.danger') : $r('app.color.text_primary'))
+          Text('逾期事项').fontSize(12).fontColor($r('app.color.text_secondary'))
+        }
+      }.width('100%')
+      Progress({ value: this.overview().completed, total: Math.max(1, this.overview().planned), type: ProgressType.Linear })
+        .color($r('app.color.accent')).backgroundColor($r('app.color.chip_background')).height(4).width('100%')
+    }.padding(20).width('100%').borderRadius(20).backgroundColor($r('app.color.card_background'))
+
+    Button('一句话添加  →', { type: ButtonType.Normal }).height(44).width('100%').fontSize(14)
+      .borderRadius(14).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+      .onClick(() => this.changeMode('quick'))
+
+    if (this.overview().urgent.length > 0) {
+      Row() {
+        Text('优先处理').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+        Blank()
+        Text(this.overview().urgent.length.toString()).fontSize(13).fontColor($r('app.color.danger'))
+      }.width('100%').padding({ top: 12 })
+      Text('逾期与高优先级事项').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      this.taskRows(false, 0, 'urgent')
+    }
+    if (this.overview().remaining.length > 0) {
+      Text('今天待办').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+        .width('100%').padding({ top: 12 })
+      this.taskRows(false, 0, 'remaining')
+    }
+    if (this.overview().urgent.length === 0 && this.overview().remaining.length === 0) {
+      Column({ space: 8 }) {
+        Text('今天暂时没有待办').fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+        Text('点右上角 ＋，安排下一件事。\n未安排日期的普通任务在「待办」里。')
+          .fontSize(13).lineHeight(21).textAlign(TextAlign.Center).fontColor($r('app.color.text_secondary'))
+      }.width('100%').padding({ top: 32, bottom: 24 })
+    }
+    if (this.overview().done.length > 0) {
+      Button((this.showHomeDone ? '收起' : '查看') + '今日已完成 · ' + this.overview().done.length.toString(),
+        { type: ButtonType.Normal }).height(44).width('100%').fontSize(13)
+        .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary'))
+        .onClick(() => { this.showHomeDone = !this.showHomeDone; })
+      if (this.showHomeDone) { this.taskRows(true, 0, 'done') }
+    }
+  }
+
+  @Builder
+  settingsPage() {
+    Text('外观').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+    Column({ space: 12 }) {
+      Text('显示模式').fontSize(15).fontColor($r('app.color.text_primary')).width('100%')
+      Row({ space: 8 }) {
+        ForEach(['system', 'light', 'dark'], (theme: string) => {
+          Button(theme === 'system' ? '跟随系统' : theme === 'light' ? '浅色' : '深色').height(44).layoutWeight(1).fontSize(13).padding(4)
+            .backgroundColor(this.theme === theme ? $r('app.color.accent') : $r('app.color.chip_background'))
+            .fontColor(this.theme === theme ? $r('app.color.on_accent') : $r('app.color.text_secondary'))
+            .onClick(() => this.selectTheme(theme))
+        })
+      }.width('100%')
+      Text('选择跟随系统，可自动使用设备的深浅色设置。')
+        .fontSize(12).lineHeight(19).fontColor($r('app.color.text_secondary')).width('100%')
+    }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))
+    Text('数据').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
+    Button('备份、日历互通与恢复  ›', { type: ButtonType.Normal }).height(56).width('100%').fontSize(15)
+      .borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+      .onClick(() => this.changeMode('tools'))
+    Column({ space: 8 }) {
+      Text('TaiPlan 0.5.0').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+      Text('待办是核心，日历帮助安排时间。\n任务保存在本机，建议定期导出备份。')
+        .fontSize(13).lineHeight(21).fontColor($r('app.color.text_secondary'))
+    }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 20, bottom: 16 })
   }
 
   @Builder
   editor() {
     Column({ space: 14 }) {
-      Text(this.editingId.length > 0 ? '编辑任务' : '记下一件事').fontSize(24).fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary')).width('100%')
+      if (this.editingId.length === 0) {
+        Button('用一句话快速填写  →', { type: ButtonType.Normal }).height(44).width('100%').fontSize(14)
+          .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
+          .borderRadius(14).onClick(() => this.changeMode('quick'))
+      }
       if (this.editingId.length > 0 && this.draftRepeat !== 'none') {
         Text('这里修改整个重复系列；勾选完成只影响当天。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       }
@@ -515,7 +653,6 @@ struct Index {
   @Builder
   quickEditor() {
     Column({ space: 16 }) {
-      Text('一句话记任务').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
       Text('例如：明天 14:30 交报告 用时60分钟 #学习\n或：每周一 复习英语 #学习 高优先级')
         .fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
       TextArea({ text: this.quickText, placeholder: '输入任务，先识别，再确认保存' }).height(150).maxLength(300)
@@ -531,9 +668,6 @@ struct Index {
   @Builder
   toolsPage() {
     Column({ space: 14 }) {
-      Text('日程工具').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
-      Button('拖拽调整任务顺序').width('100%').height(48).backgroundColor($r('app.color.card_background'))
-        .fontColor($r('app.color.accent')).onClick(() => this.openSort())
       Button('导出任务备份').width('100%').height(48).backgroundColor($r('app.color.card_background'))
         .fontColor($r('app.color.accent')).onClick(() => this.exportBackup())
       Button('从文件恢复任务').width('100%').height(48).backgroundColor($r('app.color.card_background'))
@@ -576,7 +710,6 @@ struct Index {
   @Builder
   batchPage() {
     Column({ space: 12 }) {
-      Text('批量处理').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
       Text('基于进入前的视图与筛选；重复任务只影响选中的日期。子任务进度保持不变。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Row() {
@@ -625,32 +758,122 @@ struct Index {
     }.width('100%').height('100%').enabled(!this.busy)
   }
 
+
+  @Builder
+  tabLabel(page: number) {
+    Column({ space: 4 }) {
+      if (page === 0) { Image($r('app.media.nav_today')).width(23).height(23).opacity(this.selectedTab === page ? 1 : 0.5) }
+      else if (page === 1) { Image($r('app.media.nav_tasks')).width(23).height(23).opacity(this.selectedTab === page ? 1 : 0.5) }
+      else if (page === 2) { Image($r('app.media.nav_calendar')).width(23).height(23).opacity(this.selectedTab === page ? 1 : 0.5) }
+      else { Image($r('app.media.nav_settings')).width(23).height(23).opacity(this.selectedTab === page ? 1 : 0.5) }
+      Text(this.tabTitle(page)).fontSize(11).fontWeight(this.selectedTab === page ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.selectedTab === page ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
+    }.height(64).width('100%').justifyContent(FlexAlign.Center).accessibilityText(this.tabTitle(page))
+  }
+
+  @Builder
+  rootPage(page: number) {
+    Scroll() {
+      Column({ space: 12 }) {
+        if (page === 0) { this.homePage() }
+        else if (page === 1) {
+          this.filters()
+          this.section(false, '待办', 1)
+          this.section(true, '已完成', 1)
+        } else if (page === 2) {
+          MonthCalendar({ days: this.calendarDays(), selected: this.selectedDay, month: this.month,
+            onSelect: (key: string) => { this.selectedDay = key; },
+            onMonth: (delta: number) => this.shiftMonth(delta),
+            onToday: () => { this.selectedDay = ScheduleService.key(Date.now()); this.month = this.selectedDay.slice(0, 7) + '-01'; } })
+          Text(this.selectedDay + ' · 当日事项').fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
+          this.section(false, '待办', 2)
+          this.section(true, '已完成', 2)
+        } else { this.settingsPage() }
+      }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 24 })
+    }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
+  }
+
+  @Builder
+  subpageFooter() {
+    if (this.mode === 'batch') {
+      Row({ space: 8 }) {
+        Button('取消').height(48).fontSize(13).padding({ left: 12, right: 12 }).backgroundColor($r('app.color.card_background'))
+          .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
+        Button('设为待办').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.card_background'))
+          .fontColor($r('app.color.text_primary')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(false))
+        Button('设为完成').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.accent'))
+          .fontColor($r('app.color.on_accent')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(true))
+      }.width('100%').enabled(!this.busy).padding({ left: 20, right: 20, top: 8, bottom: 12 })
+    } else if (this.mode === 'editor' || this.mode === 'sort') {
+      Row({ space: 10 }) {
+        Button('取消').layoutWeight(1).height(48).backgroundColor($r('app.color.card_background'))
+          .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
+        Button(this.busy ? '保存中…' : this.mode === 'sort' ? '保存顺序' : '保存任务').layoutWeight(1).height(48)
+          .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent'))
+          .onClick(() => { if (this.mode === 'sort') { this.saveSort(); } else { this.saveEditor(); } })
+          .enabled(this.mode === 'sort' || this.draftTitle.trim().length > 0)
+      }.width('100%').enabled(!this.busy).padding({ left: 20, right: 20, top: 8, bottom: 12 })
+    }
+  }
+
   build() {
-    Column({ space: 10 }) {
-      Row({ space: 6 }) {
-        Column({ space: 3 }) {
-          Text('TaiPlan').fontSize(28).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
-          Text('把想做的事，变成完成的事。').fontSize(11).fontColor($r('app.color.text_secondary'))
-        }.alignItems(HorizontalAlign.Start)
-        Blank()
-        Button(this.theme === 'dark' ? '深色' : this.theme === 'light' ? '浅色' : '系统')
-          .height(34).fontSize(12).padding({ left: 10, right: 10 }).backgroundColor($r('app.color.card_background'))
-          .fontColor($r('app.color.accent')).enabled(this.ready && !this.busy).onClick(() => this.switchTheme())
-        Button('⋯').width(36).height(34).padding(0).fontSize(22).backgroundColor($r('app.color.card_background'))
-          .fontColor($r('app.color.accent')).accessibilityText('打开日程工具').enabled(this.ready && !this.busy)
-          .onClick(() => this.changeMode('tools'))
-      }.width('100%').padding({ top: 12, bottom: 2 })
-      if (this.error.length > 0) { Text(this.error).fontSize(13).fontColor($r('app.color.danger')).width('100%') }
-      if (this.notice.length > 0) { Text(this.notice).fontSize(12).fontColor($r('app.color.accent')).width('100%') }
+    Column() {
+      Row({ space: 12 }) {
+        if (this.mode !== 'list') {
+          Button('‹').width(44).height(44).padding(0).fontSize(30).backgroundColor(Color.Transparent)
+            .fontColor($r('app.color.text_primary')).accessibilityText('返回')
+            .enabled(!this.busy).onClick(() => this.changeMode('list'))
+        }
+        Column({ space: 5 }) {
+          Text(this.pageTitle()).fontSize(this.mode === 'list' ? 30 : 23).fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+          if (this.mode === 'list') {
+            Text(this.selectedTab === 0 ? this.dateTitle() : this.selectedTab === 1 ? '整理任务，安排下一步' :
+              this.selectedTab === 2 ? '查看每一天的安排' : '外观与数据管理')
+              .fontSize(12).fontColor($r('app.color.text_secondary'))
+          }
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        if (this.mode === 'list' && this.selectedTab !== 3) {
+          Button('＋').width(44).height(44).padding(0).fontSize(27).backgroundColor($r('app.color.accent'))
+            .fontColor($r('app.color.on_accent')).accessibilityText('新建任务').enabled(this.ready && !this.busy)
+            .onClick(() => this.openEditor())
+        }
+      }.width('100%').padding({ left: this.mode === 'list' ? 20 : 8, right: 20, top: 16, bottom: 14 })
+      if (this.error.length > 0) {
+        Text(this.error).fontSize(13).fontColor($r('app.color.danger')).width('100%').padding({ left: 20, right: 20, bottom: 8 })
+      }
+      if (this.notice.length > 0) {
+        Text(this.notice).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%').padding({ left: 20, right: 20, bottom: 8 })
+      }
+      if (this.undoTitle.length > 0) {
+        Row({ space: 8 }) {
+          Text('已删除：' + this.undoTitle).fontSize(12).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1).fontColor($r('app.color.text_primary'))
+          Button('撤销').height(40).fontSize(13).padding(8).backgroundColor(Color.Transparent)
+            .fontColor($r('app.color.text_primary')).enabled(!this.busy).onClick(() => this.undoDelete())
+          Button('×').height(40).width(40).padding(0).backgroundColor(Color.Transparent)
+            .fontColor($r('app.color.text_secondary')).accessibilityText('关闭撤销提示')
+            .onClick(() => { this.undoTitle = ''; this.deletedBackup = undefined; })
+        }.padding({ left: 16, right: 8 }).margin({ left: 20, right: 20, bottom: 8 })
+          .borderRadius(12).backgroundColor($r('app.color.card_background'))
+      }
       if (!this.ready) {
         Blank()
         Text(this.busy ? '正在读取任务…' : '暂时无法读取任务').fontColor($r('app.color.text_secondary'))
         if (!this.busy) { Button('重新读取').onClick(() => this.load()) }
         Blank()
+      } else if (this.mode === 'list') {
+        Tabs({ barPosition: BarPosition.End, index: this.selectedTab }) {
+          TabContent() { this.rootPage(0) }.tabBar(this.tabLabel(0))
+          TabContent() { this.rootPage(1) }.tabBar(this.tabLabel(1))
+          TabContent() { this.rootPage(2) }.tabBar(this.tabLabel(2))
+          TabContent() { this.rootPage(3) }.tabBar(this.tabLabel(3))
+        }.layoutWeight(1).width('100%').barHeight(68).barMode(BarMode.Fixed).scrollable(false)
+          .backgroundColor($r('app.color.page_background'))
+          .onChange((index: number) => { this.selectedTab = index; this.now = Date.now(); this.error = ''; this.notice = ''; })
       } else {
-        if (this.mode === 'list') { this.filters() }
         if (this.mode === 'sort') {
-          Column() { this.sortingPage() }.layoutWeight(1).width('100%')
+          Column() { this.sortingPage() }.layoutWeight(1).width('100%').padding({ left: 20, right: 20 })
         } else {
           Scroll(this.scroller) {
             Column({ space: 12 }) {
@@ -658,54 +881,11 @@ struct Index {
               else if (this.mode === 'quick') { this.quickEditor() }
               else if (this.mode === 'tools') { this.toolsPage() }
               else if (this.mode === 'batch') { this.batchPage() }
-              else {
-                if (this.view === 'all' || this.view === 'today') {
-                  Text(this.todaySummary()).fontSize(12).fontColor($r('app.color.accent')).width('100%')
-                    .padding(12).borderRadius(12).backgroundColor($r('app.color.card_background'))
-                }
-                if (this.view === 'calendar') {
-                  MonthCalendar({ days: this.calendarDays(), selected: this.selectedDay, month: this.month,
-                    onSelect: (key: string) => { this.selectedDay = key; },
-                    onMonth: (delta: number) => this.shiftMonth(delta),
-                    onToday: () => { this.selectedDay = ScheduleService.key(Date.now()); this.month = this.selectedDay.slice(0, 7) + '-01'; } })
-                }
-                this.section(false, '待办')
-                this.section(true, '已完成')
-              }
-            }.width('100%').padding({ bottom: 20 })
+            }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 24 })
           }.layoutWeight(1).width('100%').align(Alignment.Top)
         }
-        if (this.mode === 'batch') {
-          Row({ space: 6 }) {
-            Button('取消').height(48).fontSize(13).padding({ left: 12, right: 12 }).backgroundColor($r('app.color.card_background'))
-              .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
-            Button('设为待办').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.card_background'))
-              .fontColor($r('app.color.accent')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(false))
-            Button('设为完成').height(48).fontSize(13).layoutWeight(1).padding(4).backgroundColor($r('app.color.accent'))
-              .fontColor($r('app.color.on_accent')).enabled(this.batchKeys.length > 0).onClick(() => this.applyBatch(true))
-          }.width('100%').enabled(!this.busy)
-        } else if (this.mode === 'editor' || this.mode === 'sort') {
-          Row({ space: 10 }) {
-            Button('取消').layoutWeight(1).height(48).backgroundColor($r('app.color.card_background'))
-              .fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('list'))
-            Button(this.busy ? '保存中…' : this.mode === 'sort' ? '保存顺序' : '保存任务').layoutWeight(1).height(48)
-              .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent'))
-              .onClick(() => { if (this.mode === 'sort') { this.saveSort(); } else { this.saveEditor(); } })
-              .enabled(this.mode === 'sort' || this.draftTitle.trim().length > 0)
-          }.enabled(!this.busy)
-        } else if (this.mode === 'list') {
-          Row({ space: 10 }) {
-            Button('一句话').height(48).fontSize(14).backgroundColor($r('app.color.card_background'))
-              .fontColor($r('app.color.accent')).onClick(() => this.changeMode('quick'))
-            Button('＋ 新建任务').height(48).layoutWeight(1).backgroundColor($r('app.color.accent'))
-              .fontColor($r('app.color.on_accent')).onClick(() => this.openEditor())
-          }.enabled(!this.busy)
-        } else {
-          Button('返回任务列表').height(48).width('100%').backgroundColor($r('app.color.card_background'))
-            .fontColor($r('app.color.accent')).enabled(!this.busy).onClick(() => this.changeMode('list'))
-        }
+        this.subpageFooter()
       }
-    }.padding({ left: 18, right: 18, bottom: 16 }).width('100%').height('100%')
-      .backgroundColor($r('app.color.page_background'))
+    }.width('100%').height('100%').backgroundColor($r('app.color.page_background'))
   }
 }

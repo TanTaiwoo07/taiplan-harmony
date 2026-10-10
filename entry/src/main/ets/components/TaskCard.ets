@@ -19,65 +19,74 @@ export struct TaskCard {
   onEdit: (task: Task) => void = () => {};
   onRemove: (task: Task) => void = () => {};
 
+
+  private overdue(): boolean {
+    return !this.completed && this.displayDueAt > 0 && TaskService.deadline(this.task, this.displayDueAt) < this.now;
+  }
   build() {
-    Row({ space: 10 }) {
-      Checkbox({ name: this.task.id }).select(this.completed)
+    Row({ space: 12 }) {
+      Checkbox({ name: this.task.id }).select(this.completed).width(22).height(22).margin({ top: 3 })
+        .responseRegion({ x: -11, y: -11, width: 44, height: 44 })
         .selectedColor($r('app.color.accent'))
-        .accessibilityText(`${this.completed ? '取消完成' : '标记完成'}：${this.task.title}`)
+        .accessibilityText((this.completed ? '取消完成：' : '标记完成：') + this.task.title)
         .onChange((selected: boolean) => { if (selected !== this.completed) { this.onToggle(this.task); } })
-      Column({ space: 8 }) {
-        Text(this.task.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
-          .fontColor(this.completed ? $r('app.color.text_secondary') : $r('app.color.text_primary'))
-          .decoration({ type: this.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
-        if (this.task.note.length > 0) {
-          Text(this.task.note).fontSize(13).fontColor($r('app.color.text_secondary')).maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-        }
+      Column({ space: 7 }) {
+        Row({ space: 4 }) {
+          Text(this.task.title).fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1).maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .fontColor(this.completed ? $r('app.color.text_secondary') : $r('app.color.text_primary'))
+            .decoration({ type: this.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
+            .accessibilityText('查看或编辑：' + this.task.title).onClick(() => this.onEdit(this.task))
+          Button('⋯', { type: ButtonType.Normal }).width(40).height(40).padding(0).fontSize(22)
+            .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary'))
+            .accessibilityText('任务操作：' + this.task.title)
+            .bindMenu([
+              { value: '编辑', action: () => this.onEdit(this.task) },
+              { value: '复制为新任务', action: () => this.onCopy() },
+              { value: this.task.repeat === 'none' ? '删除' : '跳过或删除', action: () => this.onRemove(this.task) }
+            ])
+        }.width('100%')
         Row({ space: 8 }) {
-          Text(`${TaskService.priorityLabel(this.task.priority)}优先级`).fontSize(12)
-            .fontColor(this.task.priority === 2 ? $r('app.color.danger') : $r('app.color.accent'))
+          Text(TaskService.priorityLabel(this.task.priority) + '优先级').fontSize(11)
+            .fontColor(!this.completed && this.task.priority === 2 ? $r('app.color.danger') : $r('app.color.text_secondary'))
           if (this.displayDueAt > 0) {
-            Text(`${(!this.completed && TaskService.deadline(this.task, this.displayDueAt) < this.now) ? '已逾期 · ' : ''}${TaskService.dateLabel(this.displayDueAt)}`)
-              .fontSize(12).layoutWeight(1)
-              .fontColor((!this.completed && TaskService.deadline(this.task, this.displayDueAt) < this.now) ? $r('app.color.danger') : $r('app.color.text_secondary'))
+            Text((this.overdue() ? '逾期 · ' : '') + TaskService.dateLabel(this.displayDueAt)).fontSize(11)
+              .layoutWeight(1).fontColor(this.overdue() ? $r('app.color.danger') : $r('app.color.text_secondary'))
           }
         }.width('100%')
-        if ((this.task.startMinute ?? -1) >= 0) {
-          Text(`${TaskService.timeLabel(this.task)} · ${this.task.durationMinutes ?? 30} 分钟`).fontSize(13)
-            .fontColor($r('app.color.accent')).width('100%')
-        }
-        if (this.task.repeat !== 'none') {
-          Text(ScheduleService.repeatLabel(this.task.repeat) + '重复 · 勾选仅完成本次').fontSize(11).fontColor($r('app.color.accent')).width('100%')
+        if ((this.task.startMinute ?? -1) >= 0 || this.task.repeat !== 'none') {
+          Text(((this.task.startMinute ?? -1) >= 0 ? TaskService.timeLabel(this.task) : '全天') +
+            (this.task.repeat !== 'none' ? ' · ' + ScheduleService.repeatLabel(this.task.repeat) : ''))
+            .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
         }
         if (this.task.tags.length > 0) {
-          Text(this.task.tags.map((tag: string) => `#${tag}`).join('  ')).fontSize(12)
-            .fontColor($r('app.color.accent')).width('100%')
+          Text(this.task.tags.map((tag: string) => '#' + tag).join('  ')).fontSize(11)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.text_secondary')).width('100%')
+        }
+        if (this.task.note.length > 0 && this.expanded) {
+          Text(this.task.note).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
         }
         if ((this.task.steps ?? []).length > 0) {
-          Button(`${this.expanded ? '收起' : '展开'}子任务 · ${this.doneSteps.length}/${(this.task.steps ?? []).length}`)
-            .height(32).fontSize(12).padding({ left: 0, right: 8 }).backgroundColor(Color.Transparent)
-            .fontColor($r('app.color.accent')).onClick(() => this.onExpand())
+          Button((this.expanded ? '收起子任务' : '子任务') + ' · ' + this.doneSteps.length.toString() + '/' + (this.task.steps ?? []).length.toString(),
+            { type: ButtonType.Normal }).height(40).fontSize(12).padding({ left: 0, right: 8 })
+            .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).onClick(() => this.onExpand())
           if (this.expanded) {
             ForEach(this.task.steps ?? [], (step: string, index: number) => {
-              Row({ space: 6 }) {
-                Checkbox({ name: `${this.task.id}-step-${index}` }).select(this.doneSteps.includes(index))
-                  .width(18).height(18).selectedColor($r('app.color.accent')).accessibilityText(step)
+              Row({ space: 8 }) {
+                Checkbox({ name: this.task.id + '-step-' + index.toString() }).select(this.doneSteps.includes(index))
+                  .responseRegion({ x: -12, y: -12, width: 44, height: 44 })
+                  .width(20).height(20).selectedColor($r('app.color.accent')).accessibilityText(step)
                   .onChange((selected: boolean) => { if (selected !== this.doneSteps.includes(index)) { this.onStep(index); } })
                 Text(step).fontSize(13).layoutWeight(1).fontColor($r('app.color.text_primary'))
                   .decoration({ type: this.doneSteps.includes(index) ? TextDecorationType.LineThrough : TextDecorationType.None })
-              }.width('100%').padding({ top: 4, bottom: 4 })
-            }, (step: string, index: number) => `${index}:${step}`)
+              }.width('100%').constraintSize({ minHeight: 44 })
+            }, (step: string, index: number) => index.toString() + ':' + step)
           }
         }
-        Row({ space: 10 }) {
-          Button('编辑', { type: ButtonType.Normal }).fontSize(13).height(36)
-            .backgroundColor(Color.Transparent).fontColor($r('app.color.accent')).onClick(() => this.onEdit(this.task))
-          Button('删除', { type: ButtonType.Normal }).fontSize(13).height(36)
-            .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).onClick(() => this.onRemove(this.task))
-          Button('复制', { type: ButtonType.Normal }).fontSize(13).height(36)
-            .backgroundColor(Color.Transparent).fontColor($r('app.color.accent')).onClick(() => this.onCopy())
-        }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-    }.padding(16).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background')).enabled(!this.busy)
+    }.alignItems(VerticalAlign.Top).padding({ left: 14, right: 10, top: 12, bottom: 14 }).width('100%')
+      .borderRadius(16).backgroundColor($r('app.color.card_background'))
+      .border({ width: { left: !this.completed && (this.task.priority === 2 || this.overdue()) ? 3 : 0 }, color: $r('app.color.danger') })
+      .enabled(!this.busy)
   }
 }

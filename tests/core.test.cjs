@@ -28,9 +28,37 @@ function loadModule(relative, externals = {}, cache = {}) {
   return module.exports;
 }
 const { TaskService: S } = loadModule('services/TaskService.ets');
+const { FocusService: Focus } = loadModule('services/FocusService.ets');
 const draft = (overrides = {}) => ({ title: '学习 ArkTS', note: '复习课堂笔记', priority: 1, tagsText: '学习', dueAt: 0, ...overrides });
 const legacyTask = { id: 'old-1', title: '旧版任务', note: '中文 🥰', completed: true, createdAt: 10, updatedAt: 20 };
 const legacyRaw = JSON.stringify({ version: 1, tasks: [legacyTask] });
+
+test('Today overview counts only today plans and groups urgency without duplication', () => {
+  const now = new Date(2026, 9, 10, 12).getTime();
+  const make = (id, overrides) => S.create(draft(overrides), id, 10);
+  const tasks = [make('today', { dueAt: S.endOfDay(2026, 9, 10) }),
+    make('overdue', { dueAt: S.endOfDay(2026, 9, 9) }),
+    make('unplanned-high', { priority: 2 }), make('unplanned-normal', {}),
+    make('future-high', { dueAt: S.endOfDay(2026, 9, 11), priority: 2 }),
+    S.toggle(make('done', { dueAt: S.endOfDay(2026, 9, 10) }), now)];
+  const overview = Focus.overview(tasks, [], now);
+  assert.equal(overview.planned, 2); assert.equal(overview.completed, 1); assert.equal(overview.overdue, 1);
+  assert.deepEqual(plain(overview.urgent.map(i => i.task.id)), ['overdue', 'unplanned-high']);
+  assert.deepEqual(plain(overview.remaining.map(i => i.task.id)), ['today']);
+  assert.deepEqual(plain(overview.done.map(i => i.task.id)), ['done']);
+});
+
+test('Today overview honors recurring completion/skips and elapsed time without counting future dates', () => {
+  const now = new Date(2026, 9, 10, 12).getTime();
+  const a = S.create(draft({ repeat: 'daily', dueAt: S.endOfDay(2026, 9, 9), startMinute: 540, durationMinutes: 60 }), 'a', 10);
+  const b = S.create(draft({ repeat: 'daily', dueAt: S.endOfDay(2026, 9, 9) }), 'b', 10);
+  const states = [{ taskId: 'a', dateKey: '2026-10-11', completed: true, skipped: false, updatedAt: now },
+    { taskId: 'b', dateKey: '2026-10-10', completed: false, skipped: true, updatedAt: now }];
+  const overview = Focus.overview([a, b], states, now);
+  assert.equal(overview.planned, 1); assert.equal(overview.completed, 0); assert.equal(overview.overdue, 1);
+  assert.equal(overview.urgent[0].dateKey, '2026-10-10');
+  assert.equal(Focus.overview([], [], now).planned, 0);
+});
 
 function repositoryFixture(raw = '') {
   const db = new DatabaseSync(':memory:');
@@ -572,6 +600,27 @@ test('ICS import uses ordinary backup merge and remains idempotent across repeat
 });
 
 const { convertRows, transfer } = require('../tools/desktop-transfer.cjs');
+
+test('Delete undo restores a whole recurring series, skipped dates and checklist progress atomically', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), stepsText: '读\n写', startMinute: 540, durationMinutes: 60 }), 'undo', 10);
+  await f.repo.save(task);
+  await f.repo.setOccurrence({ ...state('undo', '2026-10-10'), doneSteps: [0] });
+  await f.repo.setOccurrence(state('undo', '2026-10-11', false, true));
+  const snapshot = Backup.decode(Backup.encode(await f.repo.reload(), await f.repo.getOccurrences(), 30));
+  await f.repo.remove(task.id);
+  assert.equal((await f.repo.reload()).length, 0); assert.equal((await f.repo.getOccurrences()).length, 0);
+  f.fail('INTO task_step_states');
+  await assert.rejects(() => f.repo.mergeBackup(snapshot));
+  assert.equal((await f.repo.reload()).length, 0);
+  f.fail(''); assert.equal(await f.repo.mergeBackup(snapshot), 1);
+  const restored = (await f.repo.reload())[0];
+  assert.equal(restored.id, task.id); assert.equal(restored.createdAt, 10); assert.equal(restored.startMinute, 540);
+  const states = await f.repo.getOccurrences();
+  assert.deepEqual(plain(states.find(s => s.dateKey === '2026-10-10').doneSteps), [0]);
+  assert.equal(states.find(s => s.dateKey === '2026-10-11').skipped, true);
+  assert.equal(await f.repo.mergeBackup(snapshot), 0); f.db.close();
+});
 const desktopRow = (overrides = {}) => ({ id: 1, title: '桌面任务 🥰', description: '原备注', url: 'https://example.com', date: '2026-10-11',
   time: '09:30', priority: 'urgent', is_completed: 0, created_at: '2026-10-01 10:00:00', updated_at: '2026-10-02 11:00:00',
   is_recurring: 0, recurrence_frequency: null, recurrence_interval: 1, recurrence_end_type: null, recurrence_end_date: null,

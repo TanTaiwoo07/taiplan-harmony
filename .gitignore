@@ -12,3 +12,6 @@ original-hashes-before.json
 build-test.log
 tests/layout.json
 milestones/
+reference/
+migration/
+tests/latest-test.log
