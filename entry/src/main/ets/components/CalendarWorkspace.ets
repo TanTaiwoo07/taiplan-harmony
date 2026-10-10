@@ -11,6 +11,7 @@ export struct CalendarWorkspace {
   @Prop selected: string = '';
   @Prop view: string = 'month';
   @Prop weekStart: number = 1;
+  @Prop snapMinutes: number = 15;
   @Prop now: number = Date.now();
   onSelect: (day: string) => void = () => {};
   onView: (view: string) => void = () => {};
@@ -79,7 +80,7 @@ export struct CalendarWorkspace {
           }
         }, (day: string) => day)
         ForEach([this.view], (view: string) => {
-          TimeTable({ tasks: this.tasks, states: this.states, days: CalendarService.days(this.selected, view, this.weekStart),
+          TimeTable({ tasks: this.tasks, states: this.states, snapMinutes: this.snapMinutes, days: CalendarService.days(this.selected, view, this.weekStart),
             selected: this.selected, now: this.now, onEdit: this.onEdit, onCreate: this.onCreate, onAdjust: this.onAdjust, onSelect: this.onSelect })
         }, (view: string) => view)
       }

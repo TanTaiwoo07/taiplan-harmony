@@ -2,6 +2,7 @@ import { OccurrenceState, Task, TaskItem } from '../model/Task';
 import { ScheduleService } from './ScheduleService';
 import { PlanningService } from './PlanningService';
 import { TaskService } from './TaskService';
+import { UrgencyService } from './UrgencyService';
 
 export interface DayOverview {
   planned: number;
@@ -24,11 +25,12 @@ export class FocusService {
       .filter((item: TaskItem) => !item.completed && item.dueAt === 0 && item.task.priority === 2);
     const pending = rows.filter((item: TaskItem) => !item.completed).concat(unplanned.filter((item: TaskItem) => !rows.some((row: TaskItem) => row.key === item.key)));
     const isOverdue = (item: TaskItem): boolean => PlanningService.overdue(item.task, item.dueAt, item.completed, now);
-    const urgent = pending.filter((item: TaskItem) => item.task.priority === 2 || isOverdue(item))
+    const urgent = pending.filter((item: TaskItem) => UrgencyService.label(item.task, item.dueAt, item.completed, now).length > 0)
+      .concat(dayItems.filter((item: TaskItem) => PlanningService.isEvent(item.task) && item.task.priority === 2))
       .sort((a: TaskItem, b: TaskItem) => Number(isOverdue(b)) - Number(isOverdue(a)) ||
         b.task.priority - a.task.priority || b.task.createdAt - a.task.createdAt);
     const keys = new Set<string>(urgent.map((item: TaskItem) => item.key));
-    return { events: dayItems.filter((item: TaskItem) => PlanningService.isEvent(item.task)), planned: scheduled.length, completed: scheduled.filter((item: TaskItem) => item.completed).length,
+    return { events: dayItems.filter((item: TaskItem) => PlanningService.isEvent(item.task) && !keys.has(item.key)), planned: scheduled.length, completed: scheduled.filter((item: TaskItem) => item.completed).length,
       overdue: pending.filter(isOverdue).length, urgent: urgent,
       remaining: ScheduleService.filter(pending.filter((item: TaskItem) => !keys.has(item.key)), false, '', '', 'time'),
       done: ScheduleService.filter(scheduled, true, '', '', 'created') };

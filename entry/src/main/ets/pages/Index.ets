@@ -1,4 +1,11 @@
 import { AutoPlanService, PlanReport, PlanSuggestion } from '../services/AutoPlanService';
+import { ProductState } from '../model/Product';
+import { ProductService } from '../services/ProductService';
+import { ProductReminderService } from '../services/ProductReminderService';
+import { ProductTools } from '../components/ProductTools';
+import { ProductSettings } from '../components/ProductSettings';
+import { AiConfigStore } from '../data/AiConfigStore';
+import { ClassificationPanel } from '../components/ClassificationPanel';
 import { ReminderService } from '../platform/ReminderService';
 import { SmartEntry } from '../components/SmartEntry';
 import { OccurrenceService } from '../services/OccurrenceService';
@@ -24,6 +31,19 @@ import { MonthCalendar } from '../components/MonthCalendar';
 @Entry
 @Component
 struct Index {
+  @State private product: ProductState = ProductService.defaults();
+  private productSaving: boolean = false;
+  private async renameClassification(kind: string, from: string, to: string): Promise<void> {
+    if (this.busy) { throw new Error('正在保存，请稍后再试'); } this.busy = true;
+    try { await this.repository.renameClassification(kind, from, to); await this.refreshData(); this.listFilter = ''; }
+    finally { this.busy = false; }
+  }
+  private async saveProduct(value: ProductState): Promise<void> {
+    if (this.productSaving || this.busy) { throw new Error('正在保存，请稍后再试'); }
+    this.productSaving = true;
+    try { await this.repository.saveProduct(value); this.product = value; this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states, ProductReminderService.intents(value, Date.now())); }
+    finally { this.productSaving = false; }
+  }
   @StorageLink('taiplanReminderTarget') @Watch('followReminder') private reminderTarget: string = '';
   @State private tasks: Task[] = [];
   @State private states: OccurrenceState[] = [];
@@ -96,6 +116,10 @@ struct Index {
   private planUndo: Task[] = [];
   @State private hasPlanUndo: boolean = false;
   private editorInitial: string = '';
+  private overviewTasks: Task[] | undefined = undefined;
+  private overviewStates: OccurrenceState[] | undefined = undefined;
+  private overviewNow: number = -1;
+  private overviewCache: DayOverview | undefined = undefined;
 
   aboutToAppear(): void {
     this.load();
@@ -189,8 +213,10 @@ struct Index {
       Row({ space: 8 }) {
         Button('更多设置').height(48).layoutWeight(1).fontSize(13).backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary'))
           .onClick(() => { this.showCapture = false; this.openEditor(); this.draftTitle = this.quickText; })
+        if (this.product.features.ai) {
         Button('一句话识别').height(48).layoutWeight(1).fontSize(13).backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary'))
           .onClick(() => { this.showCapture = false; this.changeMode('quick'); })
+        }
       }
     }.padding(24).width('100%').enabled(!this.busy)
   }
@@ -234,6 +260,7 @@ struct Index {
     try {
       this.tasks = await this.repository.load(this.context());
       this.states = await this.repository.getOccurrences();
+      this.product = await this.repository.getProduct();
       this.theme = await this.repository.getTheme();
       this.sortMode = await this.repository.getSortMode();
       this.preferences = await this.repository.getPreferences();
@@ -241,20 +268,23 @@ struct Index {
       this.showTaskDone = this.preferences.showCompleted;
       this.ready = true;
       this.followReminder();
-      this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states);
+      this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states, ProductReminderService.intents(this.product, Date.now()));
     } catch { this.error = '读取或迁移失败，请重试。已有数据仍保留。'; }
     finally { this.busy = false; }
   }
   private async refreshData(): Promise<void> {
     this.tasks = await this.repository.reload();
     this.states = await this.repository.getOccurrences();
-    this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states);
+    this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states, ProductReminderService.intents(this.product, Date.now()));
     if (this.tagFilter.length > 0 && !TaskService.allTags(this.tasks).includes(this.tagFilter)) { this.tagFilter = ''; }
   }
   private followReminder(): void {
     if (!this.ready || !this.reminderTarget) { return; }
     try {
       const target = JSON.parse(this.reminderTarget) as string[]; this.reminderTarget = '';
+      if (target[0]?.startsWith('tool:')) {
+        this.selectedTab = 3; this.changeMode('list'); this.notice = '工具提醒：请从「功能与工具」打开；隐藏的工具可重新启用。'; return;
+      }
       const task = this.tasks.find((entry: Task) => entry.id === target[0]);
       if (!task) { this.notice = '提醒对应的事项已删除'; return; }
       if (task.repeat !== 'none' && ScheduleService.validKey(target[1])) {
@@ -347,17 +377,18 @@ struct Index {
   }
   private proposePlan(): void {
     this.hasPlanUndo = false; this.planUndo = [];
-    this.planReport = AutoPlanService.suggest(this.tasks, this.states, Date.now());
+    this.planReport = AutoPlanService.suggest(this.tasks, this.states, Date.now(), this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes);
     this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.changeMode('plan');
   }
-  private async applyPlan(undo: boolean): Promise<void> {
+  private async applyPlan(undo: boolean, id: string = ''): Promise<void> {
     if (this.busy) { return; } this.busy = true;
     try {
       const current = await this.repository.reload(), states = await this.repository.getOccurrences();
       if (JSON.stringify([current, states]) !== this.planSnapshot) { throw new Error('数据已变化，请重新生成建议'); }
-      const replacement = undo ? this.planUndo : this.planReport.suggestions.map(item => item.after);
+      const chosen = this.planReport.suggestions.filter((item: PlanSuggestion) => !id || item.before.id === id);
+      const replacement = undo ? this.planUndo : chosen.map(item => item.after);
       await this.repository.saveBatch(replacement);
-      this.planUndo = undo ? [] : this.planReport.suggestions.map(item => item.before); this.hasPlanUndo = !undo;
+      this.planUndo = undo ? [] : chosen.map(item => item.before); this.hasPlanUndo = !undo;
       await this.refreshData(); this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.planReport = { suggestions: [], unscheduled: [] };
       this.notice = undo ? '已撤销本次排程' : '已采用，原有日历事件未移动';
     } catch (error) { this.error = (error as Error).message; } finally { this.busy = false; }
@@ -365,12 +396,13 @@ struct Index {
   @Builder
   planPage() {
     Text('本地辅助排程').fontSize(20).fontColor($r('app.color.text_primary'))
-    Text('仅安排收集箱任务，未来 7 天 09:00–21:00，15 分钟网格；保留已有事件。默认时长 30 分钟，可先编辑任务时长。建议尚未保存。').fontSize(13).fontColor($r('app.color.text_secondary'))
+    Text('仅安排收集箱任务，未来 7 天 ' + (this.product.workStart ?? 9).toString() + ':00–' + (this.product.workEnd ?? 21).toString() + ':00，' + this.preferences.snapMinutes.toString() + ' 分钟网格；保留已有事件。默认时长 30 分钟，可先编辑时长。建议尚未保存，单条采用后可重新计算其余任务。').fontSize(13).fontColor($r('app.color.text_secondary'))
     ForEach(this.planReport.suggestions, (item: PlanSuggestion) => {
       Column({ space: 6 }) {
         Text(item.after.title).fontSize(16).fontColor($r('app.color.text_primary'))
         Text('未安排 → ' + TaskService.dateLabel(item.after.dueAt) + ' ' + TaskService.timeLabel(item.after)).fontSize(13).fontColor($r('app.color.text_secondary'))
         Text(item.reason).fontSize(12).fontColor($r('app.color.text_secondary'))
+        Button('只采用这一项').height(48).onClick(() => this.applyPlan(false, item.before.id))
       }.padding(16).width('100%').borderRadius(16).backgroundColor($r('app.color.card_background'))
     })
     ForEach(this.planReport.unscheduled, (reason: string) => { Text(reason).fontSize(13).fontColor($r('app.color.text_secondary')) })
@@ -383,6 +415,12 @@ struct Index {
     this.draftTags = draft.tagsText; this.draftDueAt = draft.dueAt; this.draftRepeat = draft.repeat ?? 'none';
     this.draftStart = draft.startMinute ?? -1; this.draftDuration = (draft.durationMinutes ?? 30).toString();
     this.draftLocation = draft.planning?.location ?? ''; this.notice = '正在编辑这一条；原文保留在一句话输入中。请核对后保存。';
+    this.draftKind = draft.planning?.kind ?? 'task'; this.draftList = draft.planning?.listName ?? '';
+    this.draftDeadline = draft.planning?.deadlineAt ?? 0; this.draftDeadlineMode = draft.planning?.deadlineMode ?? 'none';
+    this.draftInterval = (draft.planning?.rule.interval ?? 1).toString(); this.draftWeekdays = draft.planning?.rule.weekdays ?? [];
+    this.draftUntil = draft.planning?.rule.untilDate ?? ''; this.draftCount = (draft.planning?.rule.count ?? 0).toString();
+    this.draftReminder = draft.planning?.reminder?.mode ?? 'none'; this.draftLead = draft.planning?.reminder?.leadMinutes ?? 0;
+    this.editorInitial = this.editorFingerprint();
   }
   private async saveSmartDrafts(drafts: TaskDraft[]): Promise<void> {
     if (this.busy || !drafts.length) { return; } this.busy = true; this.error = '';
@@ -626,7 +664,10 @@ struct Index {
     if (this.busy) { return; }
     this.busy = true; this.error = '';
     try {
-      const content = BackupService.encode(this.tasks, this.states, Date.now());
+      const settings = await this.repository.backupSettings();
+      const ai = await AiConfigStore.load(this.context());
+      settings.ai = { endpoint: ai.endpoint, model: ai.model };
+      const content = BackupService.encode(this.tasks, this.states, Date.now(), this.product, settings);
       if (await BackupFiles.exportFile(this.context(), content)) { this.notice = '任务备份已保存'; }
     } catch (error) { this.error = '导出失败：' + (error as Error).message; }
     finally { this.busy = false; }
@@ -641,6 +682,8 @@ struct Index {
       const count = doc.tasks.filter((task: Task) => !this.tasks.some((current: Task) => current.id === task.id)).length;
       this.pendingImport = doc;
       this.importSummary = `文件中共 ${doc.tasks.length} 个任务，将新增 ${count} 个。已有的 ${doc.tasks.length - count} 个同 ID 任务保持现状。`;
+      if (doc.product) { this.importSummary += ` 工具包含 ${doc.product.habits.length} 个习惯、${doc.product.countdowns.length} 个倒数日和 ${doc.product.sessions.length} 段计时。合并新 ID 并恢复功能开关；已有同 ID 数据保留，导入中的进行计时改为暂停或结束。`; }
+      if (doc.settings) { this.importSummary += ' 将恢复显示、排序及非敏感 AI 配置，密钥和系统提醒登记不迁移。'; }
     } catch (error) { this.error = '无法导入：' + (error as Error).message; }
     finally { this.busy = false; }
   }
@@ -670,11 +713,17 @@ struct Index {
   private async confirmImport(): Promise<void> {
     if (this.busy || !this.pendingImport) { return; }
     this.busy = true;
+    let committed = false;
     try {
       const count = await this.repository.mergeBackup(this.pendingImport);
-      await this.refreshData(); this.pendingImport = undefined; this.importSummary = '';
+      committed = true;
+      this.pendingImport = undefined; this.importSummary = '';
+      this.product = await this.repository.getProduct();
+      await this.refreshData();
+      this.preferences = await this.repository.getPreferences(); this.sortMode = await this.repository.getSortMode();
+      this.theme = await this.repository.getTheme(); await this.repository.setTheme(this.context(), this.theme);
       this.notice = `已导入 ${count} 个任务`;
-    } catch { this.error = '导入失败，数据已回滚，请重试'; }
+    } catch { this.error = committed ? '数据已导入，界面刷新失败，请重新打开应用；无需再次导入' : '导入失败，数据已回滚，请重试'; }
     finally { this.busy = false; }
   }
   private items(completed: boolean, page: number = this.selectedTab): TaskItem[] {
@@ -682,7 +731,13 @@ struct Index {
     return ScheduleService.filter(ScheduleService.project(this.tasks, this.states, view, this.selectedDay, this.now).filter((item: TaskItem) => page !== 1 || !this.listFilter || item.task.planning?.listName === this.listFilter),
       completed, page === 1 ? this.query : '', page === 1 ? this.tagFilter : '', page === 2 ? 'time' : this.sortMode);
   }
-  private overview(): DayOverview { return FocusService.overview(this.tasks, this.states, this.now); }
+  private overview(): DayOverview {
+    if (!this.overviewCache || this.overviewTasks !== this.tasks || this.overviewStates !== this.states || this.overviewNow !== this.now) {
+      this.overviewCache = FocusService.overview(this.tasks, this.states, this.now);
+      this.overviewTasks = this.tasks; this.overviewStates = this.states; this.overviewNow = this.now;
+    }
+    return this.overviewCache;
+  }
   private tabTitle(page: number): string { return ['今天', '待办', '日历', '设置'][page]; }
   private dateTitle(): string {
     const date = new Date(this.now);
@@ -690,7 +745,7 @@ struct Index {
   }
   private pageTitle(): string {
     return this.mode === 'list' ? this.tabTitle(this.selectedTab) : this.mode === 'editor' ? (this.editingId ? '编辑任务' : '新建任务') :
-      this.mode === 'plan' ? '辅助排程' : this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
+      this.mode === 'classification' ? '清单与标签' : this.mode === 'product' ? '我的工具' : this.mode === 'plan' ? '辅助排程' : this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
   }
   private calendarDays(): CalendarDay[] {
     return ScheduleService.month(this.tasks, this.states, this.month);
@@ -710,6 +765,7 @@ struct Index {
   taskRows(completed: boolean, page: number, group: string) {
     ForEach(this.rows(completed, page, group), (item: TaskItem) => {
       TaskCard({ task: item.task, completed: item.completed, displayDueAt: item.dueAt, busy: this.busy, now: this.now,
+        reminderLabel: this.reminderStatus ? this.reminders.label(item) : '',
         expanded: this.expandedKeys.includes(item.key), onExpand: () => {
           this.expandedKeys = this.expandedKeys.includes(item.key) ? this.expandedKeys.filter((key: string) => key !== item.key) : this.expandedKeys.concat([item.key]);
         },
@@ -809,18 +865,19 @@ struct Index {
     }.padding(20).width('100%').borderRadius(20).backgroundColor($r('app.color.card_background'))
 
 
-    if (this.overview().events.length > 0) {
-      Text('今天的日程 · ' + this.overview().events.length.toString()).fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
-      this.taskRows(false, 0, 'events')
-    }
+
     if (this.overview().urgent.length > 0) {
       Row() {
         Text('优先处理').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
         Blank()
         Text(this.overview().urgent.length.toString()).fontSize(13).fontColor($r('app.color.danger'))
       }.width('100%').padding({ top: 12 })
-      Text('逾期与高优先级事项').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Text('逾期、1 小时内截止与高优先级事项').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       this.taskRows(false, 0, 'urgent')
+    }
+    if (this.overview().events.length > 0) {
+      Text('今天的日程 · ' + this.overview().events.length.toString()).fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+      this.taskRows(false, 0, 'events')
     }
     if (this.overview().remaining.length > 0) {
       Text('今天待办').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
@@ -860,13 +917,15 @@ struct Index {
         .fontSize(12).lineHeight(19).fontColor($r('app.color.text_secondary')).width('100%')
     }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))
     this.preferenceSettings()
+    Button('管理清单与标签  ›').height(52).width('100%').onClick(() => this.changeMode('classification'))
+    ProductSettings({ state: this.product, onSave: (value: ProductState) => this.saveProduct(value), onOpen: () => this.changeMode('product') })
     Button('为空闲时间生成排程建议  ›').height(52).width('100%').onClick(() => this.proposePlan())
     Column({ space: 8 }) {
       Text('系统提醒').fontSize(17).fontColor($r('app.color.text_primary')).width('100%')
       Text(this.reminderStatus).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
       Text('只预约未来 7 天、最多 50 条；每次打开或修改任务时补齐。长期不打开不会自动续约。日期任务默认 09:00；不会绕过勿扰。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Button('启用授权 / 重试同步').height(44).onClick(async () => {
-        try { await this.reminders.enable(this.context()); this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states); }
+        try { await this.reminders.enable(this.context()); this.reminderStatus = await this.reminders.sync(this.context(), this.tasks, this.states, ProductReminderService.intents(this.product, Date.now())); }
         catch (error) { this.reminderStatus = '启用失败：' + (error as Error).message; }
       })
       Button('关闭并取消已登记提醒').height(44).onClick(async () => {
@@ -874,13 +933,13 @@ struct Index {
         catch { this.reminderStatus = '取消未完成，请稍后重试；不能保证旧提醒已取消'; }
       })
     }.padding(16).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background'))
-    Button('语音、自然语言与 AI 配置  ›').height(52).width('100%').onClick(() => this.changeMode('quick'))
+    if (this.product.features.ai) { Button('语音、自然语言与 AI 配置  ›').height(52).width('100%').onClick(() => this.changeMode('quick')) }
     Text('数据').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
     Button('备份、日历互通与恢复  ›', { type: ButtonType.Normal }).height(56).width('100%').fontSize(15)
       .borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
       .onClick(() => this.changeMode('tools'))
     Column({ space: 8 }) {
-      Text('TaiPlan 0.7.0 · 0.6/0.7 联合预览').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
+      Text('TaiPlan 0.8.0 · 交付候选').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
       Text('待办是核心，日历帮助安排时间。\n任务保存在本机，建议定期导出备份。')
         .fontSize(13).lineHeight(21).fontColor($r('app.color.text_secondary'))
     }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 20, bottom: 16 })
@@ -889,7 +948,7 @@ struct Index {
   @Builder
   editor() {
     Column({ space: 14 }) {
-      if (this.editingId.length === 0) {
+      if (this.editingId.length === 0 && this.product.features.ai) {
         Button('用一句话快速填写  →', { type: ButtonType.Normal }).height(44).width('100%').fontSize(14)
           .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
           .borderRadius(14).onClick(() => this.changeMode('quick'))
@@ -1156,7 +1215,7 @@ struct Index {
             Button('撤销时间调整 · ' + this.calendarUndoLabel).height(44).width('100%').onClick(() => this.undoCalendarAdjustment())
           }
           CalendarWorkspace({ tasks: this.tasks, states: this.states, selected: this.selectedDay, view: this.calendarView,
-            weekStart: this.preferences.weekStart, now: this.now,
+            weekStart: this.preferences.weekStart, snapMinutes: this.preferences.snapMinutes, now: this.now,
             onSelect: (day: string) => { this.selectedDay = day; this.month = day.slice(0, 7) + '-01'; },
             onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => this.adjustCalendar(item, days, minutes, resize),
             onView: (view: string) => { this.calendarView = view; }, onEdit: (item: TaskItem) => this.openOccurrence(item),
@@ -1264,6 +1323,8 @@ struct Index {
             Column({ space: 12 }) {
               if (this.mode === 'editor') { this.editor() }
               else if (this.mode === 'plan') { this.planPage() }
+              else if (this.mode === 'product') { ProductTools({ state: this.product, tasks: this.tasks, reminderStatus: this.reminderStatus, onSave: (value: ProductState) => this.saveProduct(value) }) }
+              else if (this.mode === 'classification') { ClassificationPanel({ tasks: this.tasks, onRename: (kind: string, from: string, to: string) => this.renameClassification(kind, from, to) }) }
               else if (this.mode === 'quick') { SmartEntry({ initialText: this.quickText, saving: this.busy, onTextChange: (value: string) => { this.quickText = value; }, onEdit: (draft: TaskDraft) => this.editSmartDraft(draft), onSave: (drafts: TaskDraft[]) => this.saveSmartDrafts(drafts) }) }
               else if (this.mode === 'search') { this.searchPage() }
               else if (this.mode === 'tools') { this.toolsPage() }

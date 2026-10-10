@@ -1,4 +1,5 @@
 import { Task, TaskItem } from '../model/Task';
+import { UrgencyService } from '../services/UrgencyService';
 import { PlanningService } from '../services/PlanningService';
 import { TaskService } from '../services/TaskService';
 import { ScheduleService } from '../services/ScheduleService';
@@ -13,6 +14,7 @@ export struct TaskCard {
   @Prop busy: boolean = false;
   @Prop doneSteps: number[] = [];
   @Prop expanded: boolean = false;
+  @Prop reminderLabel: string = '';
   onExpand: () => void = () => {};
   onStep: (index: number) => void = () => {};
   onCopy: () => void = () => {};
@@ -34,6 +36,12 @@ export struct TaskCard {
         .onChange((selected: boolean) => { if (selected !== this.completed) { this.onToggle(this.task); } })
       } else { Text('▦').width(22).fontSize(22).fontColor($r('app.color.text_secondary')).margin({ top: 12 }) }
       Column({ space: 7 }) {
+        if (UrgencyService.label(this.task, this.displayDueAt, this.completed, this.now)) {
+          Text(UrgencyService.label(this.task, this.displayDueAt, this.completed, this.now))
+            .fontSize(14).fontWeight(FontWeight.Bold).fontColor($r('app.color.danger'))
+            .padding({ left: 10, right: 10, top: 6, bottom: 6 }).borderRadius(8)
+            .backgroundColor($r('app.color.chip_background'))
+        }
         Row({ space: 4 }) {
           Text(this.task.title).fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1).maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -50,9 +58,9 @@ export struct TaskCard {
             ])
         }.width('100%')
         Row({ space: 8 }) {
-          if (this.task.priority !== 1 && !PlanningService.isEvent(this.task)) {
+          if (this.task.priority === 0) {
           Text(TaskService.priorityLabel(this.task.priority) + '优先级').fontSize(11)
-            .fontColor(!this.completed && this.task.priority === 2 ? $r('app.color.danger') : $r('app.color.text_secondary'))
+            .fontColor($r('app.color.text_secondary'))
           }
           if (this.displayDueAt > 0) {
             Text('计划 · ' + TaskService.dateLabel(this.displayDueAt)).fontSize(11)
@@ -60,8 +68,12 @@ export struct TaskCard {
           }
         }.width('100%')
         if (PlanningService.deadline(this.task, this.displayDueAt) > 0) {
-          Text((this.overdue() ? '已逾期 · ' : '截止 · ') + TaskService.dateLabel(PlanningService.deadline(this.task, this.displayDueAt)))
+          Text(UrgencyService.deadlineText(this.task, this.displayDueAt))
             .fontSize(12).fontColor(this.overdue() ? $r('app.color.danger') : $r('app.color.text_secondary')).width('100%')
+        }
+        if (this.reminderLabel && !this.completed) {
+          Text(this.reminderLabel).fontSize(12).fontWeight(FontWeight.Medium).width('100%')
+            .fontColor(this.reminderLabel.includes('未') || this.reminderLabel.includes('失败') ? $r('app.color.danger') : $r('app.color.text_secondary'))
         }
         if ((this.task.startMinute ?? -1) >= 0 || this.task.repeat !== 'none') {
           Text(((this.task.startMinute ?? -1) >= 0 ? TaskService.timeLabel(this.task) : '全天') +

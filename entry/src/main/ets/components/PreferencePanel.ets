@@ -13,6 +13,7 @@ export struct PreferencePanel {
     else if (key === 'week') { next.weekStart = value as number; }
     else if (key === 'done') { next.showCompleted = value as boolean; }
     else if (key === 'material') { next.useMaterial = value as boolean; }
+    else if (key === 'snap') { next.snapMinutes = value as number; }
     this.onChange(next);
   }
   build() {
@@ -36,6 +37,9 @@ export struct PreferencePanel {
       }
       Button('每周开始于：' + (this.settings.weekStart === 1 ? '星期一' : '星期日')).height(48).width('100%').fontSize(13)
         .backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.change('week', this.settings.weekStart === 1 ? 0 : 1))
+      Button('日历拖动吸附：' + this.settings.snapMinutes.toString() + ' 分钟').height(48).width('100%').fontSize(13)
+        .backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary'))
+        .onClick(() => this.change('snap', this.settings.snapMinutes === 5 ? 15 : this.settings.snapMinutes === 15 ? 30 : 5))
       Row() {
         Text('默认展开已完成').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
         Toggle({ type: ToggleType.Switch, isOn: this.settings.showCompleted }).selectedColor($r('app.color.accent')).onChange((value: boolean) => this.change('done', value))

@@ -18,3 +18,7 @@ tests/latest-test.log
 build-0607.log
 tests/baseline-0607.log
 tests/current-0607.log
+
+build-08.log
+tests/current-08.log
+delivery/

@@ -1,3 +1,4 @@
+import { ProductState } from './Product';
 export interface LegacyTask {
   id: string;
   title: string;
@@ -95,9 +96,13 @@ export interface CalendarDay {
 }
 
 export interface BackupDocument {
+  settings?: BackupSettings;
+  product?: ProductState;
   format: string;
   version: number;
   exportedAt: number;
   tasks: Task[];
   occurrences: OccurrenceState[];
 }
+export interface BackupAiConfig { endpoint: string; model: string; }
+export interface BackupSettings { display: AppPreferences; theme: string; sort: string; ai?: BackupAiConfig; }

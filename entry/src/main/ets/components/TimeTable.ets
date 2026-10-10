@@ -11,6 +11,7 @@ export struct TimeTable {
   @Prop selected: string = '';
   @State private verticalOffset: number = 420;
   @Prop now: number = Date.now();
+  @Prop snapMinutes: number = 15;
   onEdit: (item: TaskItem) => void = () => {};
   onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => void = () => {};
   onCreate: (day: string, minute: number) => void = () => {};
@@ -57,8 +58,8 @@ export struct TimeTable {
                   }
                   ForEach(this.blocks(day), (block: CalendarBlock) => {
                     Column({ space: 3 }) {
-                      Text(block.item.task.title).fontSize(12).fontWeight(FontWeight.Medium).maxLines(block.end - block.start >= 70 ? 2 : 1)
-                        .fontColor($r('app.color.text_primary')).width('100%')
+                      Text((block.item.task.priority === 2 && !block.item.completed ? '！' : '') + block.item.task.title).fontSize(12).fontWeight(FontWeight.Medium).maxLines(block.end - block.start >= 70 ? 2 : 1)
+                        .fontColor(block.item.task.priority === 2 && !block.item.completed ? $r('app.color.danger') : $r('app.color.text_primary')).width('100%')
                       if (block.end - block.start >= 70) {
                         Text((block.continuesBefore ? '续 · ' : '') + TaskService.timeLabel(block.item.task))
                           .fontSize(10).fontColor($r('app.color.text_secondary')).width('100%')
@@ -68,7 +69,7 @@ export struct TimeTable {
                         .position({ x: 0, y: Math.max(0, block.end - block.start - 22) })
                         .accessibilityText('拖动调整时长')
                         .gesture(PanGesture({ direction: PanDirection.Vertical }).onActionEnd((event: GestureEvent) => {
-                          this.onAdjust(block.item, 0, Math.round(event.offsetY / 15) * 15, true);
+                          this.onAdjust(block.item, 0, Math.round(event.offsetY / this.snapMinutes) * this.snapMinutes, true);
                         }))
                       }
                     }.padding(5).width((this.columnWidth() - 6) / block.lanes - 2).height(Math.max(18, block.end - block.start - 2))
@@ -80,7 +81,7 @@ export struct TimeTable {
                       .gesture(GestureGroup(GestureMode.Sequence, LongPressGesture({ duration: 500 }),
                         PanGesture().onActionEnd((event: GestureEvent) => {
                           this.onAdjust(block.item, this.days.length > 1 ? Math.round(event.offsetX / this.columnWidth()) : 0,
-                            Math.round(event.offsetY / 15) * 15, false);
+                            Math.round(event.offsetY / this.snapMinutes) * this.snapMinutes, false);
                         })))
                   }, (block: CalendarBlock) => JSON.stringify(block))
                   if (day === ScheduleService.key(this.now)) {

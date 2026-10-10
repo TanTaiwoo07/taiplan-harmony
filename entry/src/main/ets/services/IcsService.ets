@@ -102,6 +102,7 @@ export class IcsService {
       plan.rule.interval = Number(parts.get('INTERVAL') ?? 1); plan.rule.count = Number(parts.get('COUNT') ?? 0);
       if (parts.has('BYDAY')) { if (repeat !== 'weekly') { throw new Error('RRULE BYDAY 仅支持每周'); }
         plan.rule.weekdays = (parts.get('BYDAY') ?? '').split(',').map((day: string) => ['MO','TU','WE','TH','FR','SA','SU'].indexOf(day) + 1); }
+      if (plan.rule.weekdays.length > 0 && !plan.rule.weekdays.includes(date.getDay() || 7)) { throw new Error('DTSTART 与 BYDAY 不一致，无法完整保留首个发生项'); }
       if (parts.has('UNTIL')) { const until = IcsService.date({ name: 'UNTIL', head: 'UNTIL', value: parts.get('UNTIL') ?? '' });
         plan.rule.untilDate = ScheduleService.key(until.timestamp);
         if (!until.allDay) { const boundary = new Date(until.timestamp); if (boundary.getHours() * 60 + boundary.getMinutes() < minute) { plan.rule.untilDate = ScheduleService.shift(plan.rule.untilDate, -1); } }
@@ -113,6 +114,14 @@ export class IcsService {
       startMinute: start.allDay ? -1 : date.getHours() * 60 + date.getMinutes(), durationMinutes: duration }, `ics:${uid}`, now);
     task.completed = values.get('X-TAIPLAN-COMPLETED')?.value === 'TRUE';
     return task;
+  }
+  private static exceptionDay(task: Task, prop: IcsProperty): string {
+    const date = IcsService.date(prop); const day = ScheduleService.key(date.timestamp);
+    const minute = task.startMinute ?? -1;
+    if (date.allDay !== (minute < 0) || (!date.allDay && new Date(date.timestamp).getHours() * 60 + new Date(date.timestamp).getMinutes() !== minute)) {
+      throw new Error('例外必须匹配原始开始时间和日期类型');
+    }
+    return day;
   }
   static parse(raw: string, now: number): IcsReport {
     if (raw.length > 4 * 1024 * 1024) { throw new Error('日历文件超过 4 MB'); }
@@ -141,7 +150,7 @@ export class IcsService {
         for (const line of masters[0].filter((value: string) => /^EXDATE[;:]/.test(value))) {
           const prop = IcsService.property(line);
           for (const value of prop.value.split(',')) {
-            const day = ScheduleService.key(IcsService.date({ name: prop.name, head: prop.head, value: value }).timestamp);
+            const day = IcsService.exceptionDay(task, { name: prop.name, head: prop.head, value: value });
             if (!ScheduleService.occursOn(task, day) || task.repeat === 'none') { throw new Error('EXDATE 不属于此系列'); }
             if (!keys.has(day)) { exceptions.push({ taskId: task.id, dateKey: day, completed: false, skipped: true, updatedAt: now }); keys.add(day); }
           }
@@ -149,7 +158,7 @@ export class IcsService {
         for (const entry of entries.filter((row: string[]) => row.some((line: string) => /^RECURRENCE-ID[;:]/.test(line)))) {
           const prop = IcsService.property(entry.find((line: string) => /^RECURRENCE-ID[;:]/.test(line)) ?? '');
           if (/RANGE=/i.test(prop.head)) { throw new Error('RECURRENCE-ID RANGE 暂不支持'); }
-          const day = ScheduleService.key(IcsService.date(prop).timestamp);
+          const day = IcsService.exceptionDay(task, prop);
           if (keys.has(day) || !ScheduleService.occursOn(task, day)) { throw new Error('重复例外冲突或日期无效'); } keys.add(day);
           if (entry.includes('STATUS:CANCELLED')) { exceptions.push({ taskId: task.id, dateKey: day, completed: false, skipped: true, updatedAt: now }); continue; }
           const replacement = IcsService.event(entry.filter((line: string) => !/^RECURRENCE-ID[;:]/.test(line)), now);

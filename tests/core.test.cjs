@@ -966,3 +966,171 @@ test('Single-instance checklist edits clear only its progress, later title edits
  let states=await f.repo.getOccurrences();assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-10').doneSteps),[]);assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-11').doneSteps),[0]);
  await f.repo.setOccurrence({...state('steps','2026-10-10'),updatedAt:350,doneSteps:[1]});draft.title='仅改标题';await f.repo.save(Occ.change(changed,'2026-10-10',draft,400));states=await f.repo.getOccurrences();assert.deepEqual(plain(states.find(s=>s.dateKey==='2026-10-10').doneSteps),[1]);f.db.close();
 });
+
+const { ProductService: Product } = loadModule('services/ProductService.ets');
+const { ProductReminderService: ToolReminders } = loadModule('services/ProductReminderService.ets');
+const { UrgencyService: Urgency } = loadModule('services/UrgencyService.ets');
+const toolsFixture = () => {
+  const state = Product.defaults();
+  state.habits.push({id:'h1',title:'工作日阅读',createdDate:'2026-10-05',weekdays:[1,2,3,4,5],weeklyTarget:0,dailyTarget:1,checks:[]});
+  state.countdowns.push({id:'c1',title:'闰日生日',date:'2024-02-29',annual:true,pinned:false,category:'纪念日'});
+  return state;
+};
+test('Urgency distinguishes high-priority events, imminent deadlines, overdue and completed', () => {
+  const now = new Date(2026,9,11,12).getTime();
+  const task = modern('u','2026-10-11',600,60,'task',{priority:2});
+  task.planning.deadlineMode='datetime'; task.planning.deadlineAt=now+30*60000;
+  assert.match(Urgency.label(task, task.dueAt, false, now), /即将截止.*30/);
+  assert.match(Urgency.deadlineText(task,task.dueAt), /12:30/);
+  assert.match(Urgency.label(task,task.dueAt,false,now+60*60000), /已逾期/);
+  assert.equal(Urgency.label(task,task.dueAt,true,now+60*60000),'');
+  const event=modern('e','2026-10-11',600,60,'event',{priority:2});
+  assert.match(Urgency.label(event,event.dueAt,false,now),/紧急/);
+  const overview=Focus.overview([event,task],[],now);
+  assert.equal(overview.urgent.length,2); assert.equal(overview.planned,1); assert.equal(overview.events.length,0);
+});
+test('Urgent native reminder title and content distinguish deadline and lead time', () => {
+  const now=new Date(2026,9,11,12).getTime(); const task=modern('u','2026-10-11',780,60,'task',{priority:2});
+  task.planning.reminder={mode:'start',leadMinutes:10,at:0};
+  const result=Reminders.intents([task],[],now)[0];
+  assert.match(result.title,/紧急/); assert.match(result.content,/开始.*10/);
+});
+test('Focus restores wall-clock time across background, pauses, resumes and caps at duration', () => {
+  const now=Date.now(); let state=Product.start(Product.defaults(),'f','读书','','work',now);
+  assert.equal(Product.elapsed(Product.active(state),now+10*60000),600);
+  state=Product.transition(state,'pause',now+10*60000);
+  assert.equal(Product.elapsed(Product.active(state),now+20*60000),600);
+  state=Product.transition(state,'resume',now+20*60000);
+  assert.equal(Product.elapsed(Product.active(state),now+25*60000),900);
+  assert.throws(()=>Product.transition(state,'finish',now+25*60000));
+  state=Product.transition(state,'finish',now+40*60000);
+  assert.equal(Product.active(state),undefined); assert.equal(state.sessions[0].elapsedSeconds,1500);
+});
+test('Focus clock rollback cannot generate negative or duplicate effective time', () => {
+  const now=Date.now(); let state=Product.start(Product.defaults(),'f','专注','','work',now);
+  assert.equal(Product.elapsed(Product.active(state),now-100000),0);
+  state=Product.transition(state,'pause',now-100000); state=Product.transition(state,'resume',now-50000);
+  assert.equal(Product.elapsed(Product.active(state),now),0);
+  assert.throws(()=>Product.start(state,'g','专注','','work',now));
+});
+test('Workday habit streak skips weekends and cancellation recomputes history', () => {
+  let state=toolsFixture(); const now=new Date(2026,9,12,12).getTime();
+  for(const day of ['2026-10-08','2026-10-09','2026-10-12']) state=Product.check(state,'h1',day,true,now);
+  assert.equal(Product.streak(state.habits[0],'2026-10-12'),3);
+  state=Product.check(state,'h1','2026-10-09',false,now);
+  assert.equal(Product.streak(state.habits[0],'2026-10-12'),1);
+  assert.throws(()=>Product.check(state,'h1','2026-10-10',true,now));
+  assert.throws(()=>Product.check(state,'h1','2026-10-13',true,now));
+});
+test('Habit duplicate taps cap at daily target with one stable date record', () => {
+  let state=toolsFixture(); const now=new Date(2026,9,12,12).getTime();
+  state=Product.check(state,'h1','2026-10-12',true,now); state=Product.check(state,'h1','2026-10-12',true,now);
+  assert.equal(state.habits[0].checks.length,1); assert.equal(state.habits[0].checks[0].count,1);
+});
+test('Weekly habits count completed days, not individual check taps', () => {
+  let state=toolsFixture(); state.habits[0].weeklyTarget=3;state.habits[0].dailyTarget=2;
+  const now=new Date(2026,9,11,12).getTime();
+  state=Product.check(state,'h1','2026-10-10',true,now);
+  assert.equal(Product.weekCount(state.habits[0],'2026-10-11'),0);
+  state=Product.check(state,'h1','2026-10-10',true,now);
+  assert.equal(Product.weekCount(state.habits[0],'2026-10-11'),1);
+});
+test('Anniversaries use civil days, leap-day policy, today zero and past elapsed direction', () => {
+  const item=toolsFixture().countdowns[0];
+  assert.equal(Product.nextDate(item,'2027-02-27'),'2027-02-28');
+  assert.equal(Product.days(item,'2027-02-28'),0);
+  assert.equal(Product.nextDate(item,'2027-03-01'),'2028-02-29');
+  item.annual=false; assert.equal(Product.days(item,'2024-03-01'),-1);
+});
+test('Hidden modules retain records and reminder intentions; completed habits suppress reminders', () => {
+  let state=toolsFixture();state.habits[0].reminderMinute=1200;
+  const now=new Date(2026,9,12,12).getTime();
+  assert.equal(state.features.habits,false);
+  assert.ok(ToolReminders.intents(state,now).some(i=>i.originalDate==='2026-10-12'));
+  state=Product.check(state,'h1','2026-10-12',true,now);
+  assert.ok(!ToolReminders.intents(state,now).some(i=>i.originalDate==='2026-10-12'));
+});
+test('Focus and countdown reminders cancel when paused or switched off', () => {
+  const now=new Date(2026,9,12,12).getTime(); let state=Product.start(Product.defaults(),'f','专注','','work',now);
+  assert.equal(ToolReminders.intents(state,now).length,1);
+  state=Product.transition(state,'pause',now+1000); assert.equal(ToolReminders.intents(state,now+1000).length,0);
+  state.countdowns.push({id:'d',title:'考试',date:'2026-10-14',annual:false,pinned:false,category:'',reminderDays:1});
+  assert.equal(ToolReminders.intents(state,now)[0].at,new Date(2026,9,13,9).getTime());
+  state.countdowns[0].reminderDays=-1;assert.equal(ToolReminders.intents(state,now).length,0);
+});
+test('Backup v7 includes tools, rejects duplicate/invalid records and reads previous formats', () => {
+  const state=toolsFixture();const raw=Backup.encode([],[],Date.now(),state);
+  assert.equal(Backup.decode(raw).version,7);assert.deepEqual(plain(Backup.decode(raw).product),plain(state));
+  state.habits.push(state.habits[0]);assert.throws(()=>Backup.encode([],[],Date.now(),state));
+  assert.equal(Backup.decode(Backup.encode([],[],Date.now())).version,6);
+});
+test('Product merge never overwrites existing ids or silently starts imported running sessions', () => {
+  const now=Date.now(); const incoming=Product.start(toolsFixture(),'f','专注','','work',now);
+  const current=toolsFixture();current.habits[0].title='本机版本';
+  const merged=Product.merge(current,incoming);
+  assert.equal(merged.habits[0].title,'本机版本');assert.equal(merged.sessions[0].status,'paused');
+  assert.equal(Product.merge(merged,incoming).sessions.length,1);
+});
+test('Tools persist across SQLite reopen and failed full restore rolls back tasks and tools', async () => {
+  const f=repositoryFixture(); await f.repo.load(f.context);const state=toolsFixture();
+  await f.repo.saveProduct(state); assert.deepEqual(plain(await f.repo.getProduct()),plain(state));
+  const updated=toolsFixture();updated.countdowns.push({id:'new',title:'新日期',date:'2026-10-20',annual:false,pinned:false,category:''});
+  const document=Backup.decode(Backup.encode([modern('restore')],[],Date.now(),updated));
+  f.fail('INSERT OR REPLACE INTO metadata');
+  await assert.rejects(()=>f.repo.mergeBackup(document));
+  assert.equal((await f.repo.reload()).length,0);assert.equal((await f.repo.getProduct()).countdowns.length,1);
+  f.db.close();
+});
+
+test('Structured AI draft preserves repeat, explicit deadline, location and reminder and rejects invalid combinations', () => {
+  const row={title:'跑步',date:'2026-10-12',time:'19:00',duration:30,priority:2,location:'操场',note:'',explanation:'来自用户明确时间',kind:'task',list:'健康',deadlineDate:'2026-10-12',deadlineTime:'20:00',repeat:'weekly',interval:1,weekdays:[1,3,5],until:'2026-12-31',count:0,reminder:'start',leadMinutes:10};
+  const result=Drafts.decode(JSON.stringify({drafts:[row]}),Date.now())[0].draft;
+  assert.equal(result.repeat,'weekly');assert.equal(result.planning.reminder.leadMinutes,10);assert.equal(result.planning.location,'操场');
+  for(const patch of [{deadlineTime:'25:00'},{count:10},{weekdays:[8]},{kind:'event'},{reminder:'execute_shell'}]) {
+    assert.throws(()=>Drafts.decode(JSON.stringify({drafts:[{...row,...patch}]}),Date.now()));
+  }
+});
+test('ICS exclusions must match original clock and DATE vs DATE-TIME value type', () => {
+  const base=['BEGIN:VCALENDAR','VERSION:2.0','BEGIN:VEVENT','UID:strict','SUMMARY:课程','DTSTART:20261012T090000','DTEND:20261012T100000','RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4'];
+  for(const extra of ['EXDATE:20261019T100000','EXDATE;VALUE=DATE:20261019']) {
+    const result=Ics.parse([...base,extra,'END:VEVENT','END:VCALENDAR'].join('\r\n'),Date.now());
+    assert.equal(result.document.tasks.length,0);assert.match(result.notes.join(''),/原始开始时间/);
+  }
+});
+test('Custom planning window and snap are honored without moving fixed appointments', () => {
+  const now=new Date(2026,9,12,7).getTime();const task=modern('custom');
+  const result=AutoPlan.suggest([task],[],now,8,9,5);
+  assert.equal(result.suggestions[0].after.startMinute,480);
+  assert.throws(()=>AutoPlan.suggest([task],[],now,9,8,5));
+});
+test('Full backup settings restore atomically and persist after repository reopen', async () => {
+  const f=repositoryFixture();await f.repo.load(f.context);
+  const settings={display:{...Plan.defaults(),snapMinutes:5},theme:'dark',sort:'priority'};
+  const doc=Backup.decode(Backup.encode([modern('restored')],[],Date.now(),toolsFixture(),settings));
+  await f.repo.mergeBackup(doc);const reopened=f.newRepo();await reopened.load(f.context);
+  assert.deepEqual(plain(await reopened.backupSettings()),settings);assert.equal((await reopened.getProduct()).habits.length,1);
+  f.db.close();
+});
+test('Exporting an active focus includes elapsed time and restores paused without mutating source', () => {
+  const now=Date.now();const state=Product.start(Product.defaults(),'f','阅读','','work',now);
+  const doc=Backup.decode(Backup.encode([],[],now+120000,state));
+  assert.equal(doc.product.sessions[0].elapsedSeconds,120);assert.equal(doc.product.sessions[0].status,'paused');
+  assert.equal(state.sessions[0].status,'running');assert.equal(state.sessions[0].elapsedSeconds,0);
+});
+test('Classification rename merges duplicate tags and preserves occurrence progress transactionally', async () => {
+  const f=repositoryFixture();await f.repo.load(f.context);
+  let task=modern('classified','2026-10-12',600,30,'task',{repeat:'daily',tagsText:'旧,新',stepsText:'一步'});
+  await f.repo.save(task);await f.repo.setOccurrence({taskId:task.id,dateKey:'2026-10-12',completed:false,skipped:false,updatedAt:100,doneSteps:[0]});
+  await f.repo.renameClassification('tag','旧','新');
+  const read=(await f.repo.reload())[0];assert.deepEqual(plain(read.tags),['新']);
+  assert.deepEqual(plain((await f.repo.getOccurrences())[0].doneSteps),[0]);
+  f.db.close();
+});
+
+test('Backup AI non-sensitive configuration strips unrelated fields and rejects credential URLs', () => {
+  const settings={display:Plan.defaults(),theme:'system',sort:'created',ai:{endpoint:'https://example.com/v1/chat/completions',model:'test',secret:'must-not-restore'}};
+  const doc=Backup.decode(Backup.encode([],[],Date.now(),Product.defaults(),settings));
+  assert.equal(doc.settings.ai.secret,undefined);
+  settings.ai.endpoint='https://example.com/v1/chat/completions?key=secret';
+  assert.throws(()=>Backup.encode([],[],Date.now(),Product.defaults(),settings));
+});

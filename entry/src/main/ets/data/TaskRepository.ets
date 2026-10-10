@@ -1,9 +1,12 @@
 import { ScheduleService } from '../services/ScheduleService';
+import { ProductState } from '../model/Product';
+import { ProductService } from '../services/ProductService';
+import { ClassificationService } from '../services/ClassificationService';
 import { OccurrenceService } from '../services/OccurrenceService';
 import { OccurrenceOverride } from '../model/Task';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { preferences, relationalStore } from '@kit.ArkData';
-import { AppPreferences, TaskPlanning, BackupDocument, OccurrenceState, Task, TaskItem } from '../model/Task';
+import { AppPreferences, BackupSettings, TaskPlanning, BackupDocument, OccurrenceState, Task, TaskItem } from '../model/Task';
 import { PlanningService } from '../services/PlanningService';
 import { TaskService } from '../services/TaskService';
 import { BackupService } from '../services/BackupService';
@@ -32,6 +35,7 @@ export class TaskRepository {
     await db.executeSql('CREATE TABLE IF NOT EXISTS occurrence_overrides (task_id TEXT PRIMARY KEY, document TEXT NOT NULL)');
     await this.migrate(context, db);
     await this.migratePlanning(db);
+    TaskRepository.applyTheme(context, await this.getTheme());
     return this.readTasks(db);
   }
 
@@ -210,17 +214,16 @@ export class TaskRepository {
   }
 
   async getPreferences(): Promise<AppPreferences> {
-    const raw = await this.settings?.get('display_preferences', '');
+    const raw = await this.setting('display_preferences', '');
     if (typeof raw !== 'string' || raw.length === 0) { return PlanningService.defaults(); }
     const value = JSON.parse(raw) as AppPreferences; PlanningService.validatePreferences(value); return value;
   }
   async setPreferences(value: AppPreferences): Promise<void> {
     PlanningService.validatePreferences(value);
-    if (!this.settings) { throw new Error('设置尚未就绪'); }
-    await this.settings.put('display_preferences', JSON.stringify(value)); await this.settings.flush();
+    await this.putSetting('display_preferences', JSON.stringify(value));
   }
   async getTheme(): Promise<string> {
-    const value = await this.settings?.get('theme', 'system');
+    const value = await this.setting('theme', 'system');
     return typeof value === 'string' ? value : 'system';
   }
 
@@ -291,31 +294,49 @@ export class TaskRepository {
     const existing = (await this.readTasks(db)).map((task: Task) => task.id);
     const incoming = doc.tasks.filter((task: Task) => !existing.includes(task.id));
     const ids = incoming.map((task: Task) => task.id);
+    const product = doc.product ? ProductService.merge(await this.getProduct(), doc.product) : undefined;
     db.beginTransaction();
     try {
       for (const task of incoming) { await this.writeTask(db, task); }
       for (const state of doc.occurrences) { if (ids.includes(state.taskId)) { await this.writeOccurrence(db, state); } }
+      if (product) { await db.executeSql('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)', ['product_v1', JSON.stringify(product)]); }
+      if (doc.settings) {
+        await this.putSetting('display_preferences', JSON.stringify(doc.settings.display));
+        await this.putSetting('theme', doc.settings.theme); await this.putSetting('sort', doc.settings.sort);
+        if (doc.settings.ai) { await this.putSetting('ai_config', JSON.stringify(doc.settings.ai)); }
+      }
       db.commit();
     } catch (error) { db.rollBack(); throw error as Error; }
     return incoming.length;
   }
 
+  async getProduct(): Promise<ProductState> {
+    if (!this.store) { throw new Error('数据库尚未就绪'); }
+    const result = await this.store.querySql("SELECT value FROM metadata WHERE key='product_v1'");
+    try {
+      const value = result.goToNextRow() ? JSON.parse(result.getString(0)) as ProductState : ProductService.defaults();
+      ProductService.validate(value); return value;
+    } finally { result.close(); }
+  }
+  async saveProduct(value: ProductState): Promise<void> {
+    ProductService.validate(value);
+    if (!this.store) { throw new Error('数据库尚未就绪'); }
+    await this.store.executeSql('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)', ['product_v1', JSON.stringify(value)]);
+  }
+
   async getSortMode(): Promise<string> {
-    const value = await this.settings?.get('sort', 'created');
+    const value = await this.setting('sort', 'created');
     return typeof value === 'string' && ['created', 'manual', 'time', 'priority'].includes(value) ? value : 'created';
   }
 
   async setSortMode(mode: string): Promise<void> {
     if (!['created', 'manual', 'time', 'priority'].includes(mode)) { throw new Error('排序方式无效'); }
-    if (!this.settings) { throw new Error('设置尚未就绪'); }
-    await this.settings.put('sort', mode);
-    await this.settings.flush();
+    await this.putSetting('sort', mode);
   }
 
   async setTheme(context: common.UIAbilityContext, theme: string): Promise<void> {
-    if (!this.settings) { throw new Error('设置尚未就绪'); }
-    await this.settings.put('theme', theme);
-    await this.settings.flush();
+    if (!['system', 'light', 'dark'].includes(theme)) { throw new Error('外观无效'); }
+    await this.putSetting('theme', theme);
     TaskRepository.applyTheme(context, theme);
   }
 
@@ -323,5 +344,26 @@ export class TaskRepository {
     const mode = theme === 'dark' ? ConfigurationConstant.ColorMode.COLOR_MODE_DARK :
       theme === 'light' ? ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
     context.getApplicationContext().setColorMode(mode);
+  }
+  private async setting(key: string, fallback: string): Promise<string> {
+    if (!this.store) { throw new Error('数据库尚未就绪'); }
+    const result = await this.store.querySql('SELECT value FROM metadata WHERE key=?', ['setting:' + key]);
+    try { if (result.goToNextRow()) { return result.getString(0); } }
+    finally { result.close(); }
+    const old = await this.settings?.get(key, fallback); return typeof old === 'string' ? old : fallback;
+  }
+  private async putSetting(key: string, value: string): Promise<void> {
+    if (!this.store) { throw new Error('数据库尚未就绪'); }
+    await this.store.executeSql('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)', ['setting:' + key, value]);
+  }
+  async backupSettings(): Promise<BackupSettings> {
+    return { display: await this.getPreferences(), theme: await this.getTheme(), sort: await this.getSortMode() };
+  }
+  async renameClassification(kind: string, from: string, to: string): Promise<void> {
+    const db = this.store; if (!db) { throw new Error('数据库尚未就绪'); }
+    const changed = ClassificationService.rename(await this.readTasks(db), kind, from, to, Date.now());
+    db.beginTransaction();
+    try { for (const task of changed) { await this.writeTask(db, task); } db.commit(); }
+    catch (error) { db.rollBack(); throw error as Error; }
   }
 }

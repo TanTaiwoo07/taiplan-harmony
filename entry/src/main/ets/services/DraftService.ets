@@ -5,7 +5,10 @@ import { QuickEntryService } from './QuickEntryService';
 import { ScheduleService } from './ScheduleService';
 
 export interface DraftProposal { draft: TaskDraft; explanation: string; selected: boolean; }
-interface AiDraft { title: string; date: string; time: string; duration: number; priority: number; location: string; note: string; explanation: string; }
+interface AiDraft { title: string; date: string; time: string; duration: number; priority: number; location: string; note: string; explanation: string;
+  kind?: string; list?: string; deadlineDate?: string; deadlineTime?: string; repeat?: string; interval?: number; weekdays?: number[];
+  until?: string; count?: number; reminder?: string; leadMinutes?: number;
+}
 interface AiDraftResponse { drafts: AiDraft[]; }
 export class DraftService {
   static local(input: string, now: number): DraftProposal[] {
@@ -54,11 +57,23 @@ export class DraftService {
       if (row.time && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(row.time) || !row.date)) { throw new Error('AI 返回无效时间'); }
       const minute = row.time ? Number(row.time.slice(0, 2)) * 60 + Number(row.time.slice(3)) : -1;
       const due = row.date ? ScheduleService.end(row.date) : 0;
-      const plan = PlanningService.create(due, minute, row.duration); plan.location = row.location;
+      const plan = PlanningService.create(due, minute, row.duration, row.kind ?? 'task'); plan.location = row.location;
+      plan.listName = row.list ?? ''; plan.sourceType = 'ai';
+      const deadlineDate = row.deadlineDate ?? ''; const deadlineTime = row.deadlineTime ?? '';
+      if ((deadlineDate && !PlanningService.validDate(deadlineDate)) || (deadlineTime && (!deadlineDate || !/^([01]\d|2[0-3]):[0-5]\d$/.test(deadlineTime)))) { throw new Error('AI 返回无效截止'); }
+      if (deadlineDate) {
+        plan.deadlineMode = deadlineTime ? 'datetime' : 'date'; plan.deadlineAt = ScheduleService.end(deadlineDate);
+        if (deadlineTime) { const date = PlanningService.date(deadlineDate); date.setHours(Number(deadlineTime.slice(0, 2)), Number(deadlineTime.slice(3)), 0, 0); plan.deadlineAt = date.getTime(); }
+      }
+      plan.rule = { interval: row.interval ?? 1, weekdays: row.weekdays ?? [], untilDate: row.until ?? '', count: row.count ?? 0 };
+      if (row.reminder !== undefined) { plan.reminder = { mode: row.reminder, leadMinutes: row.leadMinutes ?? 0, at: 0 }; }
       const draft: TaskDraft = { title: row.title, note: row.note, priority: row.priority, tagsText: '', dueAt: due,
-        startMinute: minute, durationMinutes: row.duration, repeat: 'none', planning: plan };
+        startMinute: minute, durationMinutes: row.duration, repeat: row.repeat ?? 'none', planning: plan };
       TaskService.create(draft, 'preview', now);
-      return { draft: draft, explanation: row.explanation, selected: true };
+      return { draft: draft, explanation: row.explanation +
+        (deadlineDate ? ' · 截止 ' + deadlineDate + ' ' + deadlineTime : '') +
+        (draft.repeat !== 'none' ? ' · 重复 ' + draft.repeat + ' / 间隔 ' + plan.rule.interval.toString() + (plan.rule.untilDate ? ' 至 ' + plan.rule.untilDate : '') : '') +
+        (plan.reminder && plan.reminder.mode !== 'none' ? ' · 提醒 ' + plan.reminder.mode + ' 提前 ' + plan.reminder.leadMinutes.toString() + ' 分钟，保存后仍需确认系统登记' : ''), selected: true };
     });
   }
 }

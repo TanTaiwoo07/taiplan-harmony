@@ -7,7 +7,8 @@ import { OccurrenceService } from './OccurrenceService';
 export interface PlanSuggestion { before: Task; after: Task; reason: string; }
 export interface PlanReport { suggestions: PlanSuggestion[]; unscheduled: string[]; }
 export class AutoPlanService {
-  static suggest(tasks: Task[], states: OccurrenceState[], now: number): PlanReport {
+  static suggest(tasks: Task[], states: OccurrenceState[], now: number, startHour: number = 9, endHour: number = 21, snap: number = 15): PlanReport {
+    if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || endHour > 24 || startHour >= endHour || ![5, 15, 30].includes(snap)) { throw new Error('可用时段或时间网格无效'); }
     const suggestions: PlanSuggestion[] = []; const unscheduled: string[] = [];
     const inbox = tasks.filter((task: Task) => PlanningService.isInbox(task)).sort((a: Task, b: Task) => b.priority - a.priority || a.createdAt - b.createdAt);
     const working = tasks.slice(); const today = ScheduleService.key(now);
@@ -15,7 +16,7 @@ export class AutoPlanService {
       let assigned = false; const duration = task.durationMinutes ?? 30;
       for (let offset = 0; offset < 7 && !assigned; offset++) {
         const day = ScheduleService.shift(today, offset); const blocks = CalendarService.blocks(working, states, day);
-        for (let minute = 9 * 60; minute + duration <= 21 * 60; minute += 15) {
+        for (let minute = startHour * 60; minute + duration <= endHour * 60; minute += snap) {
           const clock = ScheduleService.date(day); clock.setHours(0, minute, 0, 0); const start = clock.getTime();
           if (start <= now || blocks.some(block => minute < block.end && minute + duration > block.start)) { continue; }
           const deadline = PlanningService.deadline(task, task.dueAt); if (deadline > 0 && start + duration * 60000 > deadline) { continue; }
@@ -27,7 +28,7 @@ export class AutoPlanService {
           working.push(next); assigned = true; break;
         }
       }
-      if (!assigned) { unscheduled.push(task.title + '：未来 7 天 09:00–21:00 没有满足时长和截止的空档'); }
+      if (!assigned) { unscheduled.push(task.title + '：未来 7 天所选时段没有满足时长和截止的空档'); }
     }
     if (inbox.length > 20) { unscheduled.push('每次最多规划 20 项，其余保留收集箱'); }
     return { suggestions: suggestions, unscheduled: unscheduled };

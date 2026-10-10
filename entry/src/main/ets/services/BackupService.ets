@@ -1,20 +1,37 @@
 import { OccurrenceService } from './OccurrenceService';
-import { BackupDocument, OccurrenceState, Task } from '../model/Task';
+import { ProductState } from '../model/Product';
+import { ProductService } from './ProductService';
+import { BackupDocument, BackupSettings, OccurrenceState, Task } from '../model/Task';
+import { PlanningService } from './PlanningService';
 import { TaskService } from './TaskService';
 import { ScheduleService } from './ScheduleService';
 
 export class BackupService {
-  static encode(tasks: Task[], occurrences: OccurrenceState[], now: number): string {
+  static encode(tasks: Task[], occurrences: OccurrenceState[], now: number, product?: ProductState, settings?: BackupSettings): string {
     const doc: BackupDocument = { format: 'TaiPlanHarmony', version: 6, exportedAt: now, tasks: tasks, occurrences: occurrences };
+    if (product) {
+      doc.version = 7; doc.product = ProductService.clone(product);
+      const active = ProductService.active(doc.product);
+      if (active) { active.elapsedSeconds = ProductService.elapsed(active, now); active.resumedAt = now; active.status = 'paused'; }
+    }
+    if (settings) { doc.version = 7; doc.settings = settings; }
     const raw = JSON.stringify(doc, null, 2);
-    BackupService.decode(raw);
-    return raw;
+    return JSON.stringify(BackupService.decode(raw), null, 2);
   }
   static decode(raw: string): BackupDocument {
     if (raw.length > 4 * 1024 * 1024) { throw new Error('备份超过 4 MB，请选择较小的文件'); }
     const doc = JSON.parse(raw) as BackupDocument;
-    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4, 5, 6].includes(doc.version) || !Array.isArray(doc.tasks) ||
+    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4, 5, 6, 7].includes(doc.version) || !Array.isArray(doc.tasks) ||
       !Array.isArray(doc.occurrences) || doc.tasks.length > 5000 || doc.occurrences.length > 50000) { throw new Error('不是受支持的 TaiPlan 备份'); }
+    if (doc.product !== undefined) { ProductService.validate(doc.product); }
+    if (doc.settings !== undefined) {
+      if (!doc.settings || !['system', 'light', 'dark'].includes(doc.settings.theme) || !['created', 'manual', 'time', 'priority'].includes(doc.settings.sort)) { throw new Error('备份偏好无效'); }
+      PlanningService.validatePreferences(doc.settings.display);
+      const ai = doc.settings.ai;
+      if (ai !== undefined && (!ai || typeof ai.endpoint !== 'string' || typeof ai.model !== 'string' || ai.endpoint.length > 2048 || ai.model.length > 128 ||
+        (ai.endpoint && !/^https:\/\/[^\s@?#]+\/[^\s?#]*$/.test(ai.endpoint)))) { throw new Error('备份 AI 配置无效'); }
+      if (ai) { doc.settings.ai = { endpoint: ai.endpoint, model: ai.model }; }
+    }
     const ids = new Set<string>();
     const byId = new Map<string, Task>();
     for (const task of doc.tasks) {

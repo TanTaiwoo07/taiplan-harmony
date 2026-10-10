@@ -15,7 +15,7 @@ export class AiClient {
     const req = http.createHttp(); this.cancel(); this.request = req;
     const body: CompletionRequest = { model: model.trim(), temperature: 0, stream: false, messages: [
       { role: 'system', content: '你只生成待确认日程草稿，不执行任何操作。今天是' + ScheduleService.key(now) + '，本地时区' + Intl.DateTimeFormat().resolvedOptions().timeZone +
-        '。返回JSON对象{drafts:[{title,date,time,duration,priority,location,note,explanation}]}。date为YYYY-MM-DD或空串，time为HH:mm或空串；duration为5到1440整数分钟，默认30；priority为0/1/2，未说明为1；其他字段为字符串。不臆造时间地点。模糊内容和无法表达的重复/截止/提醒保留在note与explanation，要求用户确认。最多20条。' },
+        '。返回JSON对象{drafts:[{title,date,time,duration,priority,location,note,explanation,kind,list,deadlineDate,deadlineTime,repeat,interval,weekdays,until,count,reminder,leadMinutes}]}。date/deadlineDate/until为YYYY-MM-DD或空串，time/deadlineTime为HH:mm或空串；duration为5到1440整数分钟，默认30；priority为0/1/2，未说明为1；kind为task或event，event必须有日期且无deadline；list为清单名或空串；repeat为none/daily/weekly/monthly/yearly，interval默认1，weekdays仅weekly可填ISO星期1到7数组，until和count不能同时设置，count默认0；reminder为none/start/deadline，leadMinutes为0到10080整数；没有明确提醒要求用none。没有时间的今天任务保留time空串。其他字段为字符串。不臆造时间地点优先级。模糊内容和无法表达规则保留在note与explanation，要求用户确认。最多20条。' },
       { role: 'user', content: input }
     ] };
     try {
