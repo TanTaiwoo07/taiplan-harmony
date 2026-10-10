@@ -107,7 +107,7 @@ test('Deadline is local end-of-day, and completed tasks are never overdue', () =
 });
 test('Legacy migration preserves all original fields and adds predictable defaults', () => {
   const [task] = S.migrateLegacy(legacyRaw);
-  assert.deepEqual(plain(task), { ...legacyTask, priority: 1, tags: [], dueAt: 0 });
+  assert.deepEqual(plain(task), { ...legacyTask, priority: 1, tags: [], dueAt: 0, repeat: 'none', sortOrder: -10 });
   for (const raw of ['{', '{}', JSON.stringify({ version: 2, tasks: [] }), JSON.stringify({ version: 1, tasks: [legacyTask, legacyTask] })]) {
     assert.throws(() => S.migrateLegacy(raw));
   }
@@ -173,4 +173,177 @@ test('Theme selection persists and is restored during a subsequent load', async 
   assert.equal(await f.repo.getTheme(), 'dark');
   assert.equal(f.modes.at(-1), 0);
   f.db.close();
+});
+
+const { ScheduleService: Calendar } = loadModule('services/ScheduleService.ets');
+const { QuickEntryService: Quick } = loadModule('services/QuickEntryService.ets');
+const { BackupService: Backup } = loadModule('services/BackupService.ets');
+const date = key => Calendar.end(key);
+const makeRepeat = (repeat, key, id = 'r') => S.create(draft({ repeat, dueAt: date(key) }), id, 10);
+const state = (taskId, dateKey, completed = true, skipped = false) => ({ taskId, dateKey, completed, skipped, updatedAt: 100 });
+
+test('Recurrence requires an anchor and rejects unknown rules and invalid dates', () => {
+  assert.throws(() => S.create(draft({ repeat: 'daily' }), 'r', 1));
+  assert.throws(() => S.create(draft({ repeat: 'yearly', dueAt: date('2026-10-10') }), 'r', 1));
+  assert.throws(() => S.create(draft({ dueAt: 1e100 }), 'r', 1));
+  assert.equal(Calendar.validKey('2026-02-30'), false);
+});
+test('Monthly recurrence clamps to the month end without drifting the original day', () => {
+  const task = makeRepeat('monthly', '2024-01-31');
+  for (const key of ['2024-01-31', '2024-02-29', '2024-03-31', '2024-04-30']) assert.equal(Calendar.occursOn(task, key), true);
+  for (const key of ['2023-12-31', '2024-02-28', '2024-03-29', '2024-04-29']) assert.equal(Calendar.occursOn(task, key), false);
+  assert.equal(Calendar.occursOn(makeRepeat('monthly', '2025-01-31'), '2025-02-28'), true);
+});
+test('Weekly recurrence respects its weekday and never starts before the anchor', () => {
+  const task = makeRepeat('weekly', '2026-10-12');
+  assert.equal(Calendar.occursOn(task, '2026-10-05'), false);
+  assert.equal(Calendar.occursOn(task, '2026-10-19'), true);
+  assert.equal(Calendar.occursOn(task, '2026-10-20'), false);
+});
+test('Completing or skipping one occurrence does not affect other dates', () => {
+  const task = makeRepeat('daily', '2026-10-10');
+  const states = [state('r', '2026-10-10'), state('r', '2026-10-11', false, true)];
+  assert.equal(Calendar.project([task], states, 'calendar', '2026-10-10', date('2026-10-10'))[0].completed, true);
+  assert.equal(Calendar.project([task], states, 'calendar', '2026-10-11', date('2026-10-10')).length, 0);
+  assert.equal(Calendar.project([task], states, 'calendar', '2026-10-12', date('2026-10-10'))[0].completed, false);
+  assert.equal(task.completed, false);
+});
+test('All view represents each series once, including a far-future anchor', () => {
+  const now = date('2026-10-10');
+  const daily = makeRepeat('daily', '2026-10-01');
+  assert.equal(Calendar.project([daily], [], 'all', '', now).length, 1);
+  assert.equal(Calendar.project([daily], [state('r', '2026-10-10', false, true)], 'all', '', now)[0].dateKey, '2026-10-11');
+  const future = makeRepeat('monthly', '2029-01-31');
+  assert.equal(Calendar.project([future], [], 'all', '', now)[0].dateKey, '2029-01-31');
+});
+test('Today includes overdue unfinished tasks; future is bounded to the next 30 days', () => {
+  const now = date('2026-10-10');
+  const overdue = S.create(draft({ dueAt: date('2026-10-09') }), 'overdue', 1);
+  const noDate = S.create(draft(), 'undated', 2);
+  const next = S.create(draft({ dueAt: date('2026-10-11') }), 'next', 3);
+  assert.deepEqual(plain(Calendar.project([overdue, noDate, next], [], 'today', '', now).map(i => i.key)), ['overdue']);
+  const items = Calendar.project([makeRepeat('daily', '2026-10-10')], [], 'future', '', now);
+  assert.equal(items.length, 30); assert.equal(items[0].dateKey, '2026-10-11'); assert.equal(items.at(-1).dateKey, '2026-11-09');
+});
+test('Calendar produces six Monday-first weeks and counts completed but not skipped items', () => {
+  const days = Calendar.month([makeRepeat('daily', '2026-10-10')], [state('r', '2026-10-10'), state('r', '2026-10-11', false, true)], '2026-10-01');
+  assert.equal(days.length, 42); assert.equal(days[0].key, '2026-09-28');
+  assert.equal(days.find(d => d.key === '2026-10-10').count, 1);
+  assert.equal(days.find(d => d.key === '2026-10-11').count, 0);
+});
+test('Date-based recurrence survives daylight-saving transitions', () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    assert.equal(Calendar.shift('2026-03-07', 2), '2026-03-09');
+    assert.equal(Calendar.shift('2026-10-31', 2), '2026-11-02');
+    const task = makeRepeat('weekly', '2026-03-01');
+    assert.equal(Calendar.occursOn(task, '2026-03-08'), true);
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
+test('Natural-language quick entry creates a reviewable draft with date, tags and priority', () => {
+  const parsed = Quick.parse('明天 交报告 #学习 高优先级', date('2026-10-10'));
+  assert.equal(parsed.title, '交报告'); assert.equal(Calendar.key(parsed.dueAt), '2026-10-11');
+  assert.equal(parsed.priority, 2); assert.equal(parsed.tagsText, '学习');
+  const weekly = Quick.parse('每周一 复习英语 #学习', date('2026-10-10'));
+  assert.equal(weekly.repeat, 'weekly'); assert.equal(Calendar.key(weekly.dueAt), '2026-10-12');
+  assert.equal(Quick.parse('阅读原子习惯', date('2026-10-10')).dueAt, 0);
+});
+test('Quick entry handles year boundaries, explicit dates and rejects nonexistent dates', () => {
+  assert.equal(Calendar.key(Quick.parse('明天跨年', date('2026-12-31')).dueAt), '2027-01-01');
+  assert.equal(Calendar.key(Quick.parse('2028-2-29 学习', date('2026-10-10')).dueAt), '2028-02-29');
+  assert.throws(() => Quick.parse('2026-02-30 学习', date('2026-10-10')));
+  assert.throws(() => Quick.parse('明天 #学习', date('2026-10-10')));
+});
+test('Reordering moves an item rather than swapping and does not mutate the source', () => {
+  const tasks = ['a', 'b', 'c'].map((id, i) => S.create(draft(), id, i + 1));
+  assert.deepEqual(plain(Calendar.move(tasks, 0, 2).map(t => t.id)), ['b', 'c', 'a']);
+  assert.deepEqual(tasks.map(t => t.id), ['a', 'b', 'c']);
+  assert.deepEqual(plain(Calendar.move(tasks, -1, 3).map(t => t.id)), ['a', 'b', 'c']);
+});
+test('Pre-0.3 database without option rows upgrades without losing existing fields', async () => {
+  const f = repositoryFixture();
+  await f.repo.load(f.context);
+  f.db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?)').run('v02', '已有任务', '备注', 1, 20, 30, 2, date('2026-10-11'));
+  f.db.prepare('INSERT INTO task_tags VALUES (?,?)').run('v02', '旧标签');
+  const [task] = await f.newRepo().load(f.context);
+  assert.equal(task.repeat, 'none'); assert.equal(task.sortOrder, -20);
+  assert.equal(task.completed, true); assert.deepEqual(plain(task.tags), ['旧标签']);
+  f.db.close();
+});
+test('Repeat completion persists independently; changing the rule clears stale history', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const task = makeRepeat('daily', '2026-10-10'); await f.repo.save(task);
+  await f.repo.setOccurrence(state('r', '2026-10-10'));
+  const repo2 = f.newRepo(); await repo2.load(f.context);
+  assert.equal((await repo2.getOccurrences())[0].completed, true);
+  await repo2.save(S.edit(task, draft({ title: '改标题', repeat: 'daily', dueAt: task.dueAt }), 100));
+  assert.equal((await repo2.getOccurrences()).length, 1);
+  await repo2.save(S.edit(task, draft({ repeat: 'weekly', dueAt: task.dueAt }), 101));
+  assert.equal((await repo2.getOccurrences()).length, 0);
+  f.db.close();
+});
+test('Manual ordering persists and default creation order remains available', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const a = S.create(draft(), 'a', 1), b = S.create(draft(), 'b', 2);
+  await f.repo.save(a); await f.repo.save(b); await f.repo.saveOrder([a, b]); await f.repo.setSortMode('manual');
+  const tasks = await f.newRepo().load(f.context);
+  assert.deepEqual(plain(Calendar.ordered(tasks).map(t => t.id)), ['a', 'b']);
+  assert.deepEqual(plain(S.section(tasks, false).map(t => t.id)), ['b', 'a']);
+  assert.equal(await f.repo.getSortMode(), 'manual'); f.db.close();
+});
+test('Backup round-trip includes rules, tags, order and occurrence states', () => {
+  const task = makeRepeat('monthly', '2026-01-31');
+  const states = [state('r', '2026-02-28')];
+  const decoded = Backup.decode(Backup.encode([task], states, 100));
+  assert.deepEqual(plain(decoded.tasks), plain([task])); assert.deepEqual(plain(decoded.occurrences), states);
+});
+test('Backup validation rejects duplicates, unknown rules and orphan or invalid occurrence records', () => {
+  const task = makeRepeat('weekly', '2026-10-12');
+  for (const [tasks, states] of [
+    [[task, task], []], [[{ ...task, repeat: 'yearly' }], []], [[task], [state('missing', '2026-10-12')]],
+    [[task], [state('r', '2026-10-13')]], [[task], [state('r', '2026-10-12'), state('r', '2026-10-12')]],
+    [[{ ...task, tags: ['a', 'a'] }], []], [[{ ...task, dueAt: 'tomorrow' }], []]
+  ]) assert.throws(() => Backup.decode(Backup.encode(tasks, states, 100)));
+  assert.throws(() => Backup.decode('{"format":"other","version":3,"tasks":[],"occurrences":[]}'));
+});
+test('Backup merge preserves existing tasks; importing twice never creates duplicates', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const existing = S.create(draft({ title: '保留我的修改' }), 'a', 1); await f.repo.save(existing);
+  const imported = makeRepeat('daily', '2026-10-10', 'b');
+  const doc = Backup.decode(Backup.encode([S.create(draft({ title: '过期备份' }), 'a', 1), imported], [state('b', '2026-10-10')], 100));
+  assert.equal(await f.repo.mergeBackup(doc), 1); assert.equal(await f.repo.mergeBackup(doc), 0);
+  const tasks = await f.repo.reload(); assert.equal(tasks.length, 2);
+  assert.equal(tasks.find(t => t.id === 'a').title, '保留我的修改');
+  assert.equal((await f.repo.getOccurrences()).length, 1); f.db.close();
+});
+test('Failed backup import rolls back every imported task and leaves existing data intact', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  await f.repo.save(S.create(draft(), 'original', 1));
+  const task = makeRepeat('daily', '2026-10-10');
+  const doc = Backup.decode(Backup.encode([task], [state('r', '2026-10-10')], 100));
+  f.fail('INSERT OR REPLACE INTO task_occurrences');
+  await assert.rejects(() => f.repo.mergeBackup(doc)); f.fail('');
+  assert.deepEqual(plain((await f.repo.reload()).map(t => t.id)), ['original']);
+  assert.equal((await f.repo.getOccurrences()).length, 0); f.db.close();
+});
+test('Deleting a series removes its tags, ordering options and occurrence history', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  await f.repo.save(makeRepeat('daily', '2026-10-10')); await f.repo.setOccurrence(state('r', '2026-10-10'));
+  await f.repo.remove('r');
+  for (const table of ['tasks', 'task_tags', 'task_options', 'task_occurrences']) {
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ' + table).get().n, 0);
+  }
+  f.db.close();
+});
+
+test('Next occurrence survives skipping more than a year of monthly occurrences', () => {
+  const task = makeRepeat('monthly', '2026-01-31');
+  let next = '2026-01-31';
+  const states = [];
+  for (let i = 0; i < 18; i++) {
+    states.push(state('r', next, false, true));
+    next = Calendar.nextDate(task, Calendar.shift(next, 1));
+  }
+  assert.equal(Calendar.project([task], states, 'all', '', date('2026-01-01'))[0].dateKey, '2027-07-31');
 });

@@ -11,3 +11,4 @@ local.properties
 original-hashes-before.json
 build-test.log
 tests/layout.json
+milestones/

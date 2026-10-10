@@ -1,39 +1,64 @@
-# TaiPlan Harmony 0.2.0
+# TaiPlan Harmony 0.3.0
 
-鸿蒙原生待办应用，使用 ArkTS、ArkUI、HarmonyOS API 26。当前工作目录为桌面测试副本。
+鸿蒙原生待办应用，使用 ArkTS、ArkUI、HarmonyOS API 26。开发与测试均在桌面 `taiplan-harmony-test` 副本中完成。
 
-## 已实现
+## 功能
 
-- 新建、编辑、删除任务，完成 / 取消完成；待办与已完成分区，创建时间倒序。
-- 搜索标题、备注和标签；搜索与标签筛选可组合。
-- 高 / 中 / 低优先级；每任务最多 5 个自定义标签，每标签最多 12 字。
-- 可选截止日期（本地日期当天 23:59:59.999），未完成且已过截止日期的任务显示逾期。
-- 跟随系统 / 浅色 / 深色主题；点击右上角按钮循环切换。
-- ArkData 关系型数据库保存任务和标签；Preferences 保存主题设置。
-- 首次升级自动迁移旧版 Preferences 任务，保留旧记录原文。任务和迁移标记在同一事务提交，失败则回滚。
+- 任务新建、编辑、删除、完成与取消完成；待办和已完成分区，默认按创建时间倒序。
+- 标题、备注、标签组合搜索；高 / 中 / 低优先级；最多 5 个标签，每个最多 12 字。
+- 截止日期、逾期提示；系统 / 浅色 / 深色主题持久化。
+- 全部、今天、未来 30 天、月历四种视图。月历点击日期看当天事项，支持切换月份与回到今天。
+- 每天、每周、每月重复；完成记录按日期独立保存。可以跳过单次，在工具页恢复，或确认后删除整组。
+- 工具页长按任务拖动排序，也可使用上下箭头；保存后启用手动顺序，列表可随时切回创建倒序。
+- 一句话录入：本地规则识别日期、重复规则、标签、优先级，先预览草稿，再由用户保存。
+- 系统文件选择器导出 / 导入 JSON 备份；校验后预览合并数量，已有同 ID 任务保持现状。
+- ArkData 关系型数据库保存任务、标签、排序及重复完成记录；自动保留并迁移旧版数据。
+
+## 使用约定
+
+**日期与重复**：日期精确到本地当天 23:59:59.999。今天视图包含今天的重复事项和已逾期的普通未完成任务；没有截止日期的任务在全部视图中查看。未来视图展示明天起 30 天内的事项。全部视图每个重复系列只展示今天或下一次，过往完成记录可到月历查看。每周按起始日的星期重复，每月按起始日重复；不足该日的月份取最后一天，下月仍沿用原始日期。
+
+编辑重复任务会修改整个系列；仅修改标题、备注等保留完成记录。改变起始日期或重复规则时，如果已有完成 / 跳过记录，会先提示确认重置。
+
+**一句话示例**：
+
+```text
+明天 交报告 #学习 高优先级
+每周一 复习英语 #学习
+2026-10-11 准备演示 #项目
+```
+
+支持今天、明天、后天、下周几、明确日期、每天 / 每周 / 每月、#标签和高 / 中 / 低优先级。它是离线规则解析，不调用 AI API；不能识别的文字保留在标题中，保存前请核对草稿。
+
+**备份**：当前格式为 `TaiPlanHarmony` version 3，包含任务、标签、顺序和重复完成 / 跳过记录，不包含主题设置。单文件最多 4 MB、5,000 个任务、50,000 条日期状态。导入只新增不存在的任务 ID；相同 ID 的任务及其日期状态均保留本机版本。多次导入不会产生重复任务。导入使用事务，失败整体回滚。该格式不能直接读取桌面 Python 版的 SQLite / 备份。
 
 ## 结构
 
 ```text
 entry/src/main/ets/
-  pages/Index.ets              页面、筛选与编辑状态
-  components/TaskCard.ets      任务卡片
-  model/Task.ets               任务与草稿类型
-  services/TaskService.ets     校验、搜索、排序、日期和旧数据解析
-  data/TaskRepository.ets      数据库 CRUD、迁移和主题持久化
+  pages/Index.ets               页面与交互状态
+  components/TaskCard.ets       任务卡片
+  components/MonthCalendar.ets  月历
+  model/Task.ets                任务、日期状态与备份类型
+  services/TaskService.ets      校验、搜索、编辑、旧数据解析
+  services/ScheduleService.ets  日期投影、重复规则、月历、排序
+  services/QuickEntryService.ets 本地一句话解析
+  services/BackupService.ets    备份格式与校验
+  data/TaskRepository.ets       数据库事务、迁移和设置
+  data/BackupFiles.ets          系统文件选择器与 UTF-8 文件读写
   entryability/EntryAbility.ets 应用入口
-tests/core.test.cjs            业务规则、SQL/事务和迁移测试
+tests/core.test.cjs             业务规则、真实 SQLite SQL 与事务测试
 ```
 
-数据库包含 tasks、task_tags、metadata 三张表。SQL 使用绑定参数。保存任务和替换标签、删除任务及关联标签均使用事务。页面等待写入成功后再更新列表，保存失败保留编辑内容。重复启动根据迁移标记跳过旧数据导入，避免覆盖已经修改的任务。
+数据库包含 `tasks`、`task_tags`、`metadata`、`task_options`、`task_occurrences` 五张表。重复任务只保存规则及发生变化的日期状态，不提前生成无限任务。0.2 升级通过新增关联表兼容旧数据；更早的 Preferences 数据在首次启动时事务迁移，迁移失败保留原文，成功后不重复导入。SQL 使用绑定参数。页面等待持久化成功后更新列表，保存失败保留编辑内容。
 
 ## 运行
 
-1. 在 DevEco Studio 中打开本项目，确认 SDK 为 HarmonyOS 26.0.0。
-2. 执行 ohpm install，创建并启动 API 26 手机模拟器。
-3. 使用 IDE 运行 entry，或使用以下 PowerShell 命令构建、安装、启动。
+1. 在 DevEco Studio 中打开本目录，安装 HarmonyOS 26.0.0 SDK。
+2. 执行 `ohpm install`，创建并启动 API 26 手机模拟器。
+3. 使用 IDE 运行 entry，或在项目目录执行以下 PowerShell 命令。
 
-本机 DevEco Studio 安装在 D:\Program Files\Huawei\DevEco Studio：
+本机 DevEco Studio 安装位置为 `D:\Program Files\Huawei\DevEco Studio`：
 
 ```powershell
 $env:DEVECO_SDK_HOME='D:\Program Files\Huawei\DevEco Studio\sdk'
@@ -41,34 +66,28 @@ $env:JAVA_HOME='D:\Program Files\Huawei\DevEco Studio\jbr'
 $env:Path='D:\Program Files\Huawei\DevEco Studio\tools\node;'+$env:Path
 & 'D:\Program Files\Huawei\DevEco Studio\tools\ohpm\bin\ohpm.bat' install
 & 'D:\Program Files\Huawei\DevEco Studio\tools\hvigor\bin\hvigorw.bat' --mode module -p product=default -p module=entry@default assembleHap --no-daemon
-& 'D:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe' install -r entry\build\default\outputs\default\entry-default-unsigned.hap
-& 'D:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe' shell aa start -a EntryAbility -b com.taiwoo.taiplan
+$hdc='D:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe'
+& $hdc list targets
+& $hdc -t 127.0.0.1:5555 install -r entry\build\default\outputs\default\entry-default-unsigned.hap
+& $hdc -t 127.0.0.1:5555 shell aa start -a EntryAbility -b com.taiwoo.taiplan
 ```
 
-这是原生应用，从模拟器窗口交互，无 HTTP 访问地址。当前未签名 HAP 已在本地 API 26 模拟器安装；真机安装需要配置相应签名并验收。
+设备地址以 `hdc list targets` 结果为准。这是原生应用，从模拟器窗口交互，无 HTTP 地址。当前未签名 HAP 可在本地 API 26 模拟器安装；真机需配置签名，并单独验收。
 
-## 测试
+不要复用从其他目录复制来的 `.hvigor` 或 `entry/build` 缓存，它们可能带有原目录的绝对路径。本副本使用独立生成的缓存。`milestones/v0.2.0` 保留上一版源码和 HAP 快照，不参与编译或 Git 提交。
+
+## 验证
 
 ```powershell
 & 'D:\Program Files\Huawei\DevEco Studio\tools\node\node.exe' --test tests/core.test.cjs
 ```
 
-需要 Node 24（使用内置 SQLite）。测试默认使用上述 DevEco 目录中的 TypeScript；其他安装位置可通过 TAIPLAN_TYPESCRIPT 环境变量指定 TypeScript 模块路径。
+需要 Node 24（内置 SQLite）。测试默认使用上述 DevEco 中的 TypeScript；其他安装路径可通过 `TAIPLAN_TYPESCRIPT` 指定 TypeScript 模块目录。
 
-12 项测试覆盖：
-中文与 emoji 数据保留、编辑与完成状态、标签解析及边界、组合搜索与排序、截止日期、旧数据格式校验、迁移幂等性、迁移失败回滚、损坏数据保护、任务与标签更新原子性、CRUD 与关联标签清理、主题保存恢复。
+32 项测试覆盖：中文和 emoji、字段边界、组合搜索、CRUD、升级保留、事务回滚、主题恢复、重复日期隔离、闰年与月末、夏令时、长期跳过后的下次日期、月历投影、未来视图范围、离线解析、手动排序、备份校验与幂等合并。这些测试运行实际业务代码和 SQLite SQL，模拟 Harmony 系统接口，不能替代设备测试。
 
-这些测试执行实际业务代码和真实 SQLite SQL，模拟 Harmony 系统接口；不能代替模拟器或真机测试。
+2026-10-10：API 26 模拟器构建、覆盖安装、启动通过；旧任务保留；中文一句话录入、每日任务预览与保存、单次完成隔离、未来视图、月历选日与滑动、长按拖动保存已通过原生交互检查。文件选择器导出、重复导入不覆盖、删除测试系列后从备份恢复及日期完成记录保留、跳过与恢复单次事项、进程重启后数据和手动顺序恢复均通过。排序按钮与工具按钮的内边距问题已修复。本轮未做真机验收。系统接口可能抛出异常的编译告警仍存在，页面操作入口捕获并显示错误。
 
-### 本轮模拟器验收（2026-10-10）
+## 尚未移植
 
-- API 26 Mate 90 Pro 模拟器构建、覆盖安装、启动通过。
-- 从 0.1.0 升级，原有已完成任务的标题、备注和完成状态保留。
-- 实测新增中文任务、两个标签、高优先级、2026/10/11 截止日期；保存后卡片正常显示。
-- 实测标签筛选、关键词搜索、清除搜索、深色主题切换。
-- 模拟器退出并重启后，原任务、新任务全部字段和深色主题恢复。
-- 12 项自动化测试通过；本轮未做真机验收。编译器仍有系统接口可能抛出异常的告警，页面操作入口统一捕获错误并提示。
-
-## 当前范围
-
-尚未实现拖拽排序、月历、重复任务、AI 解析、后台提醒和桌面数据导入 / 云同步。截止日期仅用于展示与逾期判断，不会触发通知。
+后台系统通知、云同步、云端 AI、ICS、Python 桌面数据库直接导入及桌面日历的拖拽改期。当前截止日期用于展示与逾期判断，不触发系统通知。

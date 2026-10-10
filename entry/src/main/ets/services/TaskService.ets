@@ -18,21 +18,26 @@ export class TaskService {
     if (title.length === 0 || title.length > 100) { throw new Error('请输入 1～100 字的任务标题'); }
     if (draft.note.length > 1000) { throw new Error('备注最多 1000 字'); }
     if (![0, 1, 2].includes(draft.priority)) { throw new Error('请选择有效的优先级'); }
-    if (!Number.isFinite(draft.dueAt) || draft.dueAt < 0) { throw new Error('截止日期无效'); }
+    if (!Number.isFinite(draft.dueAt) || draft.dueAt < 0 || draft.dueAt > 4133980799999) { throw new Error('截止日期无效'); }
+    const repeat = draft.repeat ?? 'none';
+    if (!['none', 'daily', 'weekly', 'monthly'].includes(repeat)) { throw new Error('重复规则无效'); }
+    if (repeat !== 'none' && draft.dueAt === 0) { throw new Error('请先选择重复任务的起始日期'); }
     return { id: id, title: title, note: draft.note.trim(), completed: false,
       createdAt: now, updatedAt: now, priority: draft.priority,
-      tags: TaskService.parseTags(draft.tagsText), dueAt: draft.dueAt };
+      tags: TaskService.parseTags(draft.tagsText), dueAt: draft.dueAt, repeat: repeat, sortOrder: -now };
   }
   static edit(task: Task, draft: TaskDraft, now: number): Task {
     const next = TaskService.create(draft, task.id, task.createdAt);
     next.completed = task.completed;
     next.updatedAt = now;
+    next.sortOrder = task.sortOrder;
+    if (next.repeat !== 'none') { next.completed = false; }
     return next;
   }
   static toggle(task: Task, now: number): Task {
     return { id: task.id, title: task.title, note: task.note, completed: !task.completed,
       createdAt: task.createdAt, updatedAt: now, priority: task.priority,
-      tags: task.tags.slice(), dueAt: task.dueAt };
+      tags: task.tags.slice(), dueAt: task.dueAt, repeat: task.repeat, sortOrder: task.sortOrder };
   }
   static section(tasks: Task[], completed: boolean, query: string = '', tag: string = ''): Task[] {
     const keyword = query.trim().toLocaleLowerCase();
@@ -72,7 +77,8 @@ export class TaskService {
       TaskService.validateLegacy(task, ids);
       ids.push(task.id);
       result.push({ id: task.id, title: task.title, note: task.note, completed: task.completed,
-        createdAt: task.createdAt, updatedAt: task.updatedAt, priority: 1, tags: [], dueAt: 0 });
+        createdAt: task.createdAt, updatedAt: task.updatedAt, priority: 1, tags: [], dueAt: 0,
+        repeat: 'none', sortOrder: -task.createdAt });
     }
     return result;
   }
