@@ -9,6 +9,7 @@ export struct TimeTable {
   @Prop states: OccurrenceState[] = [];
   @Prop days: string[] = [];
   @Prop selected: string = '';
+  @State private verticalOffset: number = 420;
   @Prop now: number = Date.now();
   onEdit: (item: TaskItem) => void = () => {};
   onCreate: (day: string, minute: number) => void = () => {};
@@ -25,6 +26,7 @@ export struct TimeTable {
   build() {
     Column({ space: 8 }) {
       Text(this.days.length > 1 ? '左右滑动查看整周 · 点日期切换无时间事项' : '长按空白时间格添加 · 点时间块查看详情').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Stack({ alignContent: Alignment.TopStart }) {
       Scroll(this.horizontal) {
         Column({ space: 0 }) {
           Row() {
@@ -75,8 +77,22 @@ export struct TimeTable {
               }, (day: string) => day)
             }.alignItems(VerticalAlign.Top)
           }.height(440).width(44 + this.columnWidth() * this.days.length).scrollBar(BarState.On)
+            .onDidScroll(() => { this.verticalOffset = this.scroller.currentOffset().yOffset; })
         }
       }.scrollable(ScrollDirection.Horizontal).width('100%').scrollBar(BarState.On)
+      Column({ space: 0 }) {
+        Text('时间').width(44).height(40).fontSize(11).fontColor($r('app.color.text_secondary'))
+          .backgroundColor($r('app.color.card_background'))
+        Stack({ alignContent: Alignment.TopStart }) {
+          Column({ space: 0 }) {
+            ForEach(this.hours, (hour: number) => {
+              Text(hour.toString().padStart(2, '0') + ':00').height(60).width(44).fontSize(10)
+                .fontColor($r('app.color.text_secondary')).align(Alignment.TopStart)
+            })
+          }.height(1440).position({ x: 0, y: -this.verticalOffset })
+        }.height(440).width(44).clip(true).backgroundColor($r('app.color.card_background'))
+      }.width(44).hitTestBehavior(HitTestMode.None)
+      }.width('100%')
     }.padding(10).borderRadius(18).backgroundColor($r('app.color.card_background')).width('100%')
   }
 }
