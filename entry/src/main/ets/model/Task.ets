@@ -16,6 +16,7 @@ export interface Task extends LegacyTask {
   durationMinutes?: number;
   steps?: string[];
   doneSteps?: number[]; // 普通任务的步骤进度；重复任务使用日期状态
+  planning?: TaskPlanning; // v5: dueAt/startMinute remain a compatibility projection, not a deadline.
 }
 export interface LegacyDocument { version: number; tasks: LegacyTask[]; }
 export interface TaskDraft {
@@ -28,6 +29,38 @@ export interface TaskDraft {
   startMinute?: number;
   durationMinutes?: number;
   stepsText?: string;
+  planning?: TaskPlanning;
+}
+
+export interface RecurrenceRule {
+  interval: number;
+  weekdays: number[]; // ISO Monday=1, Sunday=7
+  untilDate: string;
+  count: number; // 0 means no count limit
+}
+export interface TaskPlanning {
+  kind: string;
+  scheduleMode: string;
+  plannedDate: string;
+  startAt: number;
+  endAt: number;
+  timeZone: string;
+  deadlineMode: string;
+  deadlineAt: number;
+  location: string;
+  listName: string;
+  sourceType: string;
+  legacyTimeSemantics: boolean;
+  rule: RecurrenceRule;
+}
+
+export interface AppPreferences {
+  startPage: number;
+  calendarView: string;
+  weekStart: number;
+  snapMinutes: number;
+  showCompleted: boolean;
+  useMaterial: boolean;
 }
 
 export interface OccurrenceState {

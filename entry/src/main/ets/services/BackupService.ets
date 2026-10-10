@@ -4,7 +4,7 @@ import { ScheduleService } from './ScheduleService';
 
 export class BackupService {
   static encode(tasks: Task[], occurrences: OccurrenceState[], now: number): string {
-    const doc: BackupDocument = { format: 'TaiPlanHarmony', version: 4, exportedAt: now, tasks: tasks, occurrences: occurrences };
+    const doc: BackupDocument = { format: 'TaiPlanHarmony', version: 5, exportedAt: now, tasks: tasks, occurrences: occurrences };
     const raw = JSON.stringify(doc, null, 2);
     BackupService.decode(raw);
     return raw;
@@ -12,7 +12,7 @@ export class BackupService {
   static decode(raw: string): BackupDocument {
     if (raw.length > 4 * 1024 * 1024) { throw new Error('备份超过 4 MB，请选择较小的文件'); }
     const doc = JSON.parse(raw) as BackupDocument;
-    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4].includes(doc.version) || !Array.isArray(doc.tasks) ||
+    if (!doc || doc.format !== 'TaiPlanHarmony' || ![3, 4, 5].includes(doc.version) || !Array.isArray(doc.tasks) ||
       !Array.isArray(doc.occurrences) || doc.tasks.length > 5000 || doc.occurrences.length > 50000) { throw new Error('不是受支持的 TaiPlan 备份'); }
     const ids = new Set<string>();
     const byId = new Map<string, Task>();
@@ -31,7 +31,8 @@ export class BackupService {
         (task.doneSteps !== undefined && !Array.isArray(task.doneSteps))) { throw new Error('备份中的时间或子任务进度无效'); }
       const clean = TaskService.create({ title: task.title, note: task.note, priority: task.priority,
         tagsText: task.tags.join(','), dueAt: task.dueAt, repeat: task.repeat, startMinute: task.startMinute,
-        durationMinutes: task.durationMinutes, stepsText: (task.steps ?? []).join('\n') }, task.id, task.createdAt);
+        durationMinutes: task.durationMinutes, planning: task.planning, stepsText: (task.steps ?? []).join('\n') }, task.id, task.createdAt);
+      if (task.planning?.kind === 'event' && task.completed) { throw new Error('事件不使用任务完成状态'); }
       TaskService.validateDone(task.doneSteps ?? [], (task.steps ?? []).length);
       if (task.repeat !== 'none' && (task.doneSteps ?? []).length > 0) { throw new Error('重复任务的子任务进度必须按日期保存'); }
       if (clean.tags.length !== task.tags.length || (task.repeat !== 'none' && task.completed)) { throw new Error('备份中的重复任务或标签无效'); }

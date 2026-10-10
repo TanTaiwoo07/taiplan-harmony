@@ -1,6 +1,7 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { preferences, relationalStore } from '@kit.ArkData';
-import { BackupDocument, OccurrenceState, Task, TaskItem } from '../model/Task';
+import { AppPreferences, TaskPlanning, BackupDocument, OccurrenceState, Task, TaskItem } from '../model/Task';
+import { PlanningService } from '../services/PlanningService';
 import { TaskService } from '../services/TaskService';
 import { BackupService } from '../services/BackupService';
 
@@ -24,7 +25,9 @@ export class TaskRepository {
     await db.executeSql('CREATE TABLE IF NOT EXISTS task_occurrences (task_id TEXT NOT NULL, date_key TEXT NOT NULL, completed INTEGER NOT NULL, skipped INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(task_id,date_key))');
     await db.executeSql("CREATE TABLE IF NOT EXISTS task_details (task_id TEXT PRIMARY KEY, start_minute INTEGER NOT NULL, duration_minutes INTEGER NOT NULL, steps_json TEXT NOT NULL, done_steps_json TEXT NOT NULL)");
     await db.executeSql('CREATE TABLE IF NOT EXISTS task_step_states (task_id TEXT NOT NULL, date_key TEXT NOT NULL, done_json TEXT NOT NULL, PRIMARY KEY(task_id,date_key))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS task_planning (task_id TEXT PRIMARY KEY, document TEXT NOT NULL)');
     await this.migrate(context, db);
+    await this.migratePlanning(db);
     return this.readTasks(db);
   }
 
@@ -47,6 +50,20 @@ export class TaskRepository {
       throw error as Error;
     }
     // 保留旧版 Preferences；迁移标记和全部数据在同一事务中提交。
+  }
+
+  private async migratePlanning(db: relationalStore.RdbStore): Promise<void> {
+    const marker = await db.querySql("SELECT value FROM metadata WHERE key='planning_schema'");
+    let version = ''; try { if (marker.goToNextRow()) { version = marker.getString(0); } } finally { marker.close(); }
+    if (version === '1') { return; }
+    if (version !== '') { throw new Error('数据库来自更新版本，请使用新版应用'); }
+    const tasks = await this.readTasks(db);
+    db.beginTransaction();
+    try {
+      for (const task of tasks) { await db.executeSql('INSERT OR IGNORE INTO task_planning(task_id,document) VALUES (?,?)', [task.id, JSON.stringify(PlanningService.forTask(task))]); }
+      await db.executeSql("INSERT INTO metadata(key,value) VALUES ('planning_schema','1')");
+      db.commit();
+    } catch (error) { db.rollBack(); throw error as Error; }
   }
 
   private async readTasks(db: relationalStore.RdbStore): Promise<Task[]> {
@@ -86,12 +103,18 @@ export class TaskRepository {
       task.startMinute = task.startMinute ?? -1; task.durationMinutes = task.durationMinutes ?? 30;
       task.steps = task.steps ?? []; task.doneSteps = task.doneSteps ?? [];
     }
+    const plans = await db.querySql('SELECT task_id,document FROM task_planning');
+    try { while (plans.goToNextRow()) {
+      const task = tasks.find((item: Task) => item.id === plans.getString(0));
+      if (task) { task.planning = JSON.parse(plans.getString(1)) as TaskPlanning; }
+    } } finally { plans.close(); }
     return tasks;
   }
 
   private async writeTask(db: relationalStore.RdbStore, task: Task): Promise<void> {
     await db.executeSql('INSERT OR REPLACE INTO tasks(id,title,note,completed,created_at,updated_at,priority,due_at) VALUES (?,?,?,?,?,?,?,?)',
       [task.id, task.title, task.note, task.completed ? 1 : 0, task.createdAt, task.updatedAt, task.priority, task.dueAt]);
+    await db.executeSql('INSERT OR REPLACE INTO task_planning(task_id,document) VALUES (?,?)', [task.id, JSON.stringify(PlanningService.forTask(task))]);
     await db.executeSql('DELETE FROM task_tags WHERE task_id = ?', [task.id]);
     for (const tag of task.tags) { await db.executeSql('INSERT INTO task_tags(task_id,tag) VALUES (?,?)', [task.id, tag]); }
     await db.executeSql('INSERT OR REPLACE INTO task_options(task_id,repeat_rule,sort_order) VALUES (?,?,?)', [task.id, task.repeat, task.sortOrder]);
@@ -102,6 +125,12 @@ export class TaskRepository {
   async save(task: Task): Promise<void> {
     const db = this.store;
     if (!db) { throw new Error('数据库尚未就绪'); }
+    const previous = (await this.readTasks(db)).find((item: Task) => item.id === task.id);
+    if (task.planning && previous && previous.repeat !== 'none' &&
+      (previous.dueAt !== task.dueAt || previous.repeat !== task.repeat || JSON.stringify(PlanningService.forTask(previous).rule) !== JSON.stringify(task.planning.rule)) &&
+      (await this.getOccurrences()).some((state: OccurrenceState) => state.taskId === task.id)) {
+      throw new Error('此重复系列已有历史；当前预览版请复制为新系列后调整规则，原记录保留');
+    }
     db.beginTransaction();
     try {
       const rows = await db.querySql("SELECT t.due_at, COALESCE(o.repeat_rule,'none') AS repeat_rule, COALESCE(d.steps_json,'[]') AS steps_json FROM tasks t LEFT JOIN task_options o ON t.id=o.task_id LEFT JOIN task_details d ON t.id=d.task_id WHERE t.id=?", [task.id]);
@@ -127,11 +156,22 @@ export class TaskRepository {
       await db.executeSql('DELETE FROM task_occurrences WHERE task_id = ?', [id]);
       await db.executeSql('DELETE FROM task_details WHERE task_id = ?', [id]);
       await db.executeSql('DELETE FROM task_step_states WHERE task_id = ?', [id]);
+      await db.executeSql('DELETE FROM task_planning WHERE task_id = ?', [id]);
       await db.executeSql('DELETE FROM tasks WHERE id = ?', [id]);
       db.commit();
     } catch (error) { db.rollBack(); throw error as Error; }
   }
 
+  async getPreferences(): Promise<AppPreferences> {
+    const raw = await this.settings?.get('display_preferences', '');
+    if (typeof raw !== 'string' || raw.length === 0) { return PlanningService.defaults(); }
+    const value = JSON.parse(raw) as AppPreferences; PlanningService.validatePreferences(value); return value;
+  }
+  async setPreferences(value: AppPreferences): Promise<void> {
+    PlanningService.validatePreferences(value);
+    if (!this.settings) { throw new Error('设置尚未就绪'); }
+    await this.settings.put('display_preferences', JSON.stringify(value)); await this.settings.flush();
+  }
   async getTheme(): Promise<string> {
     const value = await this.settings?.get('theme', 'system');
     return typeof value === 'string' ? value : 'system';
@@ -173,6 +213,7 @@ export class TaskRepository {
     db.beginTransaction();
     try {
       for (const item of items) {
+        if (PlanningService.isEvent(item.task)) { continue; }
         if (item.task.repeat === 'none') {
           await db.executeSql('UPDATE tasks SET completed=?,updated_at=? WHERE id=?', [completed ? 1 : 0, now, item.task.id]);
         } else {

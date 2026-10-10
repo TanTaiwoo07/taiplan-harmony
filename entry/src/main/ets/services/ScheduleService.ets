@@ -1,3 +1,5 @@
+import { PlanningService } from './PlanningService';
+import { RecurrenceService } from './RecurrenceService';
 import { CalendarDay, OccurrenceState, Task, TaskItem, TimeConflict } from '../model/Task';
 import { TaskService } from './TaskService';
 
@@ -24,18 +26,7 @@ export class ScheduleService {
     date.setDate(date.getDate() + days);
     return ScheduleService.key(date.getTime());
   }
-  static occursOn(task: Task, key: string): boolean {
-    if (task.dueAt === 0) { return false; }
-    const anchor = ScheduleService.key(task.dueAt);
-    if (key < anchor) { return false; }
-    if (task.repeat === 'none') { return key === anchor; }
-    if (task.repeat === 'daily') { return true; }
-    const date = ScheduleService.date(key);
-    const start = ScheduleService.date(anchor);
-    if (task.repeat === 'weekly') { return date.getDay() === start.getDay(); }
-    const last = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-    return date.getDate() === Math.min(start.getDate(), last);
-  }
+  static occursOn(task: Task, key: string): boolean { return RecurrenceService.matches(task, key); }
   static item(task: Task, key: string, states: OccurrenceState[]): TaskItem | undefined {
     return ScheduleService.indexedItem(task, key, ScheduleService.indexStates(states));
   }
@@ -54,21 +45,7 @@ export class ScheduleService {
     return { key: `${task.id}@${key}`, task: task, dateKey: key,
       dueAt: ScheduleService.end(key), completed: state?.completed ?? false, doneSteps: (state?.doneSteps ?? []).slice() };
   }
-  static nextDate(task: Task, start: string): string {
-    const anchor = ScheduleService.key(task.dueAt);
-    const first = start < anchor ? anchor : start;
-    if (task.repeat === 'daily') { return first; }
-    const date = ScheduleService.date(first);
-    const origin = ScheduleService.date(anchor);
-    if (task.repeat === 'weekly') { return ScheduleService.shift(first, (origin.getDay() - date.getDay() + 7) % 7); }
-    const last = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-    let candidate = new Date(date.getFullYear(), date.getMonth(), Math.min(origin.getDate(), last), 12);
-    if (ScheduleService.key(candidate.getTime()) < first) {
-      const nextLast = new Date(date.getFullYear(), date.getMonth() + 2, 0).getDate();
-      candidate = new Date(date.getFullYear(), date.getMonth() + 1, Math.min(origin.getDate(), nextLast), 12);
-    }
-    return ScheduleService.key(candidate.getTime());
-  }
+  static nextDate(task: Task, start: string): string { return RecurrenceService.next(task, start); }
   static project(tasks: Task[], states: OccurrenceState[], view: string, selected: string, now: number): TaskItem[] {
     const today = ScheduleService.key(now);
     const stateIndex = ScheduleService.indexStates(states);
@@ -76,18 +53,20 @@ export class ScheduleService {
     for (const task of tasks) {
       if (task.repeat === 'none') {
         const key = task.dueAt > 0 ? ScheduleService.key(task.dueAt) : '';
-        const include = view === 'all' || (view === 'today' && key.length > 0 && key <= today && (!task.completed || key === today)) ||
+        const include = view === 'all' || (view === 'inbox' && PlanningService.isInbox(task)) || (view === 'scheduled' && task.dueAt > 0) || (view === 'today' && (key === today || PlanningService.overdue(task, task.dueAt, task.completed, now) || (PlanningService.deadline(task, task.dueAt) > 0 && ScheduleService.key(PlanningService.deadline(task, task.dueAt)) === today)) && (!task.completed || key === today)) ||
           (view === 'future' && key > today && key <= ScheduleService.shift(today, 30)) || (view === 'calendar' && key === selected);
         if (include) {
           const item = ScheduleService.indexedItem(task, key, stateIndex);
           if (item) { items.push(item); }
         }
       } else {
-        if (view === 'all') {
+        if (view === 'inbox') { continue; }
+        if (view === 'all' || view === 'scheduled') {
           let candidate = ScheduleService.nextDate(task, today);
-          while (stateIndex.get(`${task.id}@${candidate}`)?.skipped) {
+          while (candidate && stateIndex.get(`${task.id}@${candidate}`)?.skipped) {
             candidate = ScheduleService.nextDate(task, ScheduleService.shift(candidate, 1));
           }
+          if (!candidate) { continue; }
           const item = ScheduleService.indexedItem(task, candidate, stateIndex);
           if (item) { items.push(item); }
           continue;
@@ -106,6 +85,10 @@ export class ScheduleService {
     }
     return items;
   }
+  static startTime(item: TaskItem): number {
+    if ((item.task.startMinute ?? -1) < 0) { return item.dueAt; }
+    const date = new Date(item.dueAt); date.setHours(0, item.task.startMinute ?? 0, 0, 0); return date.getTime();
+  }
   static sortLabel(mode: string): string {
     return mode === 'manual' ? '手动顺序' : mode === 'time' ? '时间先后' : mode === 'priority' ? '优先级' : '创建倒序';
   }
@@ -119,19 +102,17 @@ export class ScheduleService {
         if (mode === 'manual') { order = a.task.sortOrder - b.task.sortOrder; }
         else if (mode === 'priority') { order = b.task.priority - a.task.priority; }
         else if (mode === 'time') {
-          const aTime = a.dueAt === 0 ? Number.MAX_SAFE_INTEGER : TaskService.deadline(a.task, a.dueAt) -
-            ((a.task.startMinute ?? -1) >= 0 ? (a.task.durationMinutes ?? 30) * 60000 : 0);
-          const bTime = b.dueAt === 0 ? Number.MAX_SAFE_INTEGER : TaskService.deadline(b.task, b.dueAt) -
-            ((b.task.startMinute ?? -1) >= 0 ? (b.task.durationMinutes ?? 30) * 60000 : 0);
+          const aTime = a.dueAt === 0 ? Number.MAX_SAFE_INTEGER : ScheduleService.startTime(a);
+          const bTime = b.dueAt === 0 ? Number.MAX_SAFE_INTEGER : ScheduleService.startTime(b);
           order = aTime - bTime;
         } else { order = b.task.createdAt - a.task.createdAt; }
         return order || b.task.createdAt - a.task.createdAt || a.dueAt - b.dueAt || b.key.localeCompare(a.key);
       });
   }
-  static month(tasks: Task[], states: OccurrenceState[], month: string): CalendarDay[] {
+  static month(tasks: Task[], states: OccurrenceState[], month: string, weekStart: number = 1): CalendarDay[] {
     const stateIndex = ScheduleService.indexStates(states);
     const first = ScheduleService.date(month.slice(0, 7) + '-01');
-    const start = ScheduleService.shift(ScheduleService.key(first.getTime()), -(first.getDay() + 6) % 7);
+    const start = ScheduleService.shift(ScheduleService.key(first.getTime()), -((first.getDay() - weekStart + 7) % 7));
     const days: CalendarDay[] = [];
     for (let i = 0; i < 42; i++) {
       const key = ScheduleService.shift(start, i);
@@ -144,7 +125,7 @@ export class ScheduleService {
     return days;
   }
   static repeatLabel(repeat: string): string {
-    return repeat === 'daily' ? '每天' : repeat === 'weekly' ? '每周' : repeat === 'monthly' ? '每月' : '不重复';
+    return repeat === 'daily' ? '每天' : repeat === 'weekly' ? '每周' : repeat === 'monthly' ? '每月' : repeat === 'yearly' ? '每年' : '不重复';
   }
   static ordered(tasks: Task[]): Task[] {
     return tasks.slice().sort((a: Task, b: Task) => a.sortOrder - b.sortOrder || b.createdAt - a.createdAt || b.id.localeCompare(a.id));
@@ -159,29 +140,30 @@ export class ScheduleService {
   static conflicts(candidate: Task, tasks: Task[], states: OccurrenceState[], now: number): TimeConflict[] {
     const result: TimeConflict[] = [];
     if ((candidate.startMinute ?? -1) < 0 || candidate.dueAt === 0 || candidate.completed) { return result; }
-    const anchor = ScheduleService.key(candidate.dueAt);
-    const today = ScheduleService.key(now);
+    const anchor = ScheduleService.key(candidate.dueAt), today = ScheduleService.key(now);
     const first = candidate.repeat === 'none' || anchor > today ? anchor : today;
-    const start = candidate.startMinute ?? 0;
-    const end = start + (candidate.durationMinutes ?? 30);
     const index = ScheduleService.indexStates(states);
     const existing = tasks.find((task: Task) => task.id === candidate.id);
     const keepHistory = existing !== undefined && existing.repeat === candidate.repeat && existing.dueAt === candidate.dueAt;
+    const seen = new Set<string>();
     for (let day = 0; day < (candidate.repeat === 'none' ? 1 : 30); day++) {
       const key = ScheduleService.shift(first, day);
       if (!ScheduleService.occursOn(candidate, key)) { continue; }
-      if (keepHistory) {
-        const own = ScheduleService.indexedItem(candidate, key, index);
-        if (!own || own.completed) { continue; }
-      }
+      const own = ScheduleService.indexedItem(candidate, key, keepHistory ? index : new Map<string, OccurrenceState>());
+      if (!own || own.completed) { continue; }
+      const start = ScheduleService.startTime(own), end = start + (candidate.durationMinutes ?? 30) * 60000;
       for (const task of tasks) {
-        if (task.id === candidate.id || (task.startMinute ?? -1) < 0 || !ScheduleService.occursOn(task, key)) { continue; }
-        const item = ScheduleService.indexedItem(task, key, index);
-        if (!item || item.completed) { continue; }
-        const otherStart = task.startMinute ?? 0;
-        if (start < otherStart + (task.durationMinutes ?? 30) && end > otherStart) {
-          result.push({ title: task.title, dateKey: key, time: TaskService.timeLabel(task) });
-          if (result.length === 5) { return result; }
+        if (task.id === candidate.id || (task.startMinute ?? -1) < 0) { continue; }
+        for (const offset of [-1, 0, 1]) {
+          const otherKey = ScheduleService.shift(key, offset);
+          if (!ScheduleService.occursOn(task, otherKey)) { continue; }
+          const item = ScheduleService.indexedItem(task, otherKey, index);
+          if (!item || item.completed || seen.has(item.key)) { continue; }
+          const otherStart = ScheduleService.startTime(item);
+          if (start < otherStart + (task.durationMinutes ?? 30) * 60000 && end > otherStart) {
+            result.push({ title: task.title, dateKey: otherKey, time: TaskService.timeLabel(task) }); seen.add(item.key);
+            if (result.length === 5) { return result; }
+          }
         }
       }
     }

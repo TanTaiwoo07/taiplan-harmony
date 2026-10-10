@@ -28,10 +28,176 @@ function loadModule(relative, externals = {}, cache = {}) {
   return module.exports;
 }
 const { TaskService: S } = loadModule('services/TaskService.ets');
+const { PlanningService: Plan } = loadModule('services/PlanningService.ets');
+const { CalendarService: TimeGrid } = loadModule('services/CalendarService.ets');
 const { FocusService: Focus } = loadModule('services/FocusService.ets');
 const draft = (overrides = {}) => ({ title: '学习 ArkTS', note: '复习课堂笔记', priority: 1, tagsText: '学习', dueAt: 0, ...overrides });
 const legacyTask = { id: 'old-1', title: '旧版任务', note: '中文 🥰', completed: true, createdAt: 10, updatedAt: 20 };
 const legacyRaw = JSON.stringify({ version: 1, tasks: [legacyTask] });
+
+const modern = (id, day = '', minute = -1, duration = 30, kind = 'task', extras = {}) => {
+  const dueAt = day ? S.endOfDay(...[Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8))]) : 0;
+  return S.create(draft({ dueAt, startMinute: minute, durationMinutes: duration,
+    planning: Plan.create(dueAt, minute, duration, kind), ...extras }), id, 100);
+};
+
+test('New capture is undated and never acquires an implicit deadline', () => {
+  const task = modern('capture');
+  assert.equal(Plan.isInbox(task), true); assert.equal(task.planning.deadlineAt, 0);
+  assert.equal(S.isOverdue(task, Date.now() + 99999999), false);
+  assert.equal(Calendar.project([task], [], 'inbox', '', Date.now()).length, 1);
+});
+test('Planned date and timed interval do not become deadlines in the new model', () => {
+  for (const minute of [-1, 600]) {
+    const task = modern('date', '2026-10-10', minute);
+    assert.equal(S.isOverdue(task, new Date(2026, 9, 12).getTime()), false);
+    assert.equal(Calendar.project([task], [], 'today', '', new Date(2026, 9, 12).getTime()).length, 0);
+    assert.equal(Calendar.project([task], [], 'scheduled', '', Date.now()).length, 1);
+  }
+});
+test('Deadline-only tasks are urgent without entering the planned-task denominator or duplicating', () => {
+  const task = modern('deadline', '', -1, 30, 'task', { priority: 2 });
+  task.planning.deadlineMode = 'date'; task.planning.deadlineAt = S.endOfDay(2026, 9, 9);
+  const overview = Focus.overview([task], [], new Date(2026, 9, 10, 12).getTime());
+  assert.equal(overview.urgent.length, 1); assert.equal(overview.planned, 0); assert.equal(overview.overdue, 1);
+});
+test('Events have dates, no task deadlines, and never enter the completion denominator', () => {
+  const event = modern('event', '2026-10-10', 600, 60, 'event');
+  const task = modern('task', '2026-10-10');
+  const overview = Focus.overview([event, task], [], new Date(2026, 9, 10, 12).getTime());
+  assert.equal(overview.planned, 1); assert.equal(overview.events.length, 1); assert.equal(overview.overdue, 0);
+  assert.throws(() => modern('bad', '', -1, 30, 'event'));
+  const bad = plain(event.planning); bad.deadlineMode = 'date'; bad.deadlineAt = event.dueAt;
+  assert.throws(() => modern('bad', '2026-10-10', 600, 60, 'event', { planning: bad }));
+});
+test('Explicit deadline and planning persist across completion and editable metadata', () => {
+  const task = modern('a', '2026-10-10'); task.planning.deadlineMode = 'date'; task.planning.deadlineAt = S.endOfDay(2026, 9, 12);
+  task.planning.location = '图书馆'; task.planning.listName = '学习';
+  assert.equal(S.isOverdue(task, S.endOfDay(2026, 9, 11)), false);
+  assert.equal(S.isOverdue(task, S.endOfDay(2026, 9, 13)), true);
+  const toggled = S.toggle(task, 200); assert.deepEqual(plain(toggled.planning), plain(task.planning));
+  assert.equal(S.isOverdue(toggled, S.endOfDay(2026, 9, 13)), false);
+});
+test('Cross-midnight time blocks split visually while retaining the same task identity', () => {
+  const task = modern('night', '2026-10-10', 23 * 60 + 30, 90);
+  const left = TimeGrid.blocks([task], [], '2026-10-10'), right = TimeGrid.blocks([task], [], '2026-10-11');
+  assert.equal(left[0].start, 1410); assert.equal(left[0].end, 1440); assert.equal(left[0].continuesAfter, true);
+  assert.equal(right[0].start, 0); assert.equal(right[0].end, 60); assert.equal(right[0].continuesBefore, true);
+  assert.equal(left[0].item.key, right[0].item.key);
+});
+test('Adjacent intervals do not overlap; connected overlaps use stable lanes', () => {
+  const tasks = [modern('a', '2026-10-10', 540, 120), modern('b', '2026-10-10', 600, 120), modern('c', '2026-10-10', 660, 120), modern('d', '2026-10-10', 780, 30)];
+  const blocks = TimeGrid.blocks(tasks, [], '2026-10-10');
+  assert.deepEqual(plain(blocks.map(b => b.lanes)), [2, 2, 2, 1]);
+  assert.deepEqual(plain(blocks.map(b => b.lane)), [0, 1, 0, 0]);
+  assert.deepEqual(plain(TimeGrid.blocks(tasks.reverse(), [], '2026-10-10')), plain(blocks));
+});
+test('Date-only items stay out of hourly blocks and week start preference crosses year boundaries', () => {
+  assert.equal(TimeGrid.blocks([modern('a', '2026-10-10')], [], '2026-10-10').length, 0);
+  assert.equal(TimeGrid.days('2027-01-01', 'week', 1)[0], '2026-12-28');
+  assert.equal(TimeGrid.days('2027-01-01', 'week', 0)[0], '2026-12-27');
+});
+test('Conflict detection includes the previous and following day for overnight intervals', () => {
+  const night = modern('night', '2026-10-10', 1410, 90);
+  const early = modern('early', '2026-10-11', 30, 60);
+  assert.equal(Calendar.conflicts(night, [early], [], Date.now()).length, 1);
+  assert.equal(Calendar.conflicts(early, [night], [], Date.now()).length, 1);
+  assert.equal(Calendar.conflicts(night, [modern('adjacent', '2026-10-11', 60, 30)], [], Date.now()).length, 0);
+});
+test('Bulk completion does not silently turn calendar events into completed tasks', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const event = modern('e', '2026-10-10', 600, 60, 'event'); await f.repo.save(event);
+  await f.repo.setCompleted([Calendar.item(event, '2026-10-10', [])], true, 200);
+  assert.equal((await f.repo.reload())[0].completed, false); f.db.close();
+});
+test('Global search covers archived completion, locations, lists, and Unicode', () => {
+  const task = modern('a'); task.planning.location = '图书馆 🥰'; task.planning.listName = 'Learning'; task.completed = true;
+  for (const q of ['图书馆', '🥰', 'learning', '课堂']) { assert.equal(TimeGrid.search([task], q).length, 1); }
+  assert.equal(TimeGrid.search([task], '').length, 0);
+});
+test('Daily intervals have finite count and terminate without an infinite projection', () => {
+  const task = modern('r', '2026-10-10', -1, 30, 'task', { repeat: 'daily' });
+  task.planning.rule.interval = 2; task.planning.rule.count = 3;
+  for (const day of ['2026-10-10', '2026-10-12', '2026-10-14']) assert.equal(Calendar.occursOn(task, day), true);
+  assert.equal(Calendar.occursOn(task, '2026-10-16'), false);
+  assert.equal(Calendar.nextDate(task, '2026-10-15'), '');
+  assert.equal(Calendar.project([task], [], 'all', '', new Date(2026, 9, 20).getTime()).length, 0);
+});
+test('Weekly intervals use Monday-based weeks, selected weekdays, and inclusive until date', () => {
+  const task = modern('r', '2026-10-12', -1, 30, 'task', { repeat: 'weekly' });
+  task.planning.rule.interval = 2; task.planning.rule.weekdays = [1, 3, 5]; task.planning.rule.untilDate = '2026-10-28';
+  assert.equal(Calendar.occursOn(task, '2026-10-14'), true);
+  assert.equal(Calendar.occursOn(task, '2026-10-19'), false);
+  assert.equal(Calendar.occursOn(task, '2026-10-28'), true);
+  assert.equal(Calendar.nextDate(task, '2026-10-29'), '');
+});
+test('Monthly/yearly recurrence preserves anchor through short months and leap years', () => {
+  const month = modern('m', '2026-01-31', -1, 30, 'task', { repeat: 'monthly' }); month.planning.rule.interval = 2;
+  assert.equal(Calendar.occursOn(month, '2026-02-28'), false); assert.equal(Calendar.occursOn(month, '2026-03-31'), true);
+  const year = modern('y', '2024-02-29', -1, 30, 'task', { repeat: 'yearly' });
+  assert.equal(Calendar.occursOn(year, '2025-02-28'), true); assert.equal(Calendar.occursOn(year, '2028-02-29'), true);
+  assert.equal(Calendar.occursOn(year, '2025-03-29'), false);
+});
+test('Malformed modern plans and conflicting recurrence endings fail backup validation', () => {
+  const task = modern('a', '2026-10-10', 600, 30, 'task', { repeat: 'weekly' });
+  for (const mutate of [p => p.startAt++, p => p.scheduleMode = 'date', p => p.rule.interval = 0, p => p.rule.weekdays = [1, 1],
+    p => { p.rule.count = 2; p.rule.untilDate = '2026-10-20'; }, p => p.rule.untilDate = '2026-02-30', p => p.deadlineAt = 1]) {
+    const copy = plain(task); mutate(copy.planning); assert.throws(() => Backup.encode([copy], [], 200));
+  }
+});
+test('Legacy version 4 still imports while malformed explicit plans cannot silently fall back to legacy semantics', async () => {
+  const task = S.create(draft({ dueAt: S.endOfDay(2026, 9, 10) }), 'legacy4', 100);
+  const doc = { format: 'TaiPlanHarmony', version: 4, exportedAt: 200, tasks: [task], occurrences: [] };
+  const f = repositoryFixture(); await f.repo.load(f.context); await f.repo.mergeBackup(doc);
+  assert.equal((await f.repo.reload())[0].planning.legacyTimeSemantics, true);
+  assert.equal(S.isOverdue((await f.repo.reload())[0], S.endOfDay(2026, 9, 11)), true);
+  assert.throws(() => modern('bad', '', -1, 30, 'task', { planning: null })); f.db.close();
+});
+test('Metadata survives an edit from callers that do not know the new planning fields', () => {
+  const task = modern('a', '2026-10-10'); task.planning.location = '教室'; task.planning.listName = '学习';
+  const edited = S.edit(task, draft({ title: '改标题', dueAt: S.endOfDay(2026, 9, 11) }), 200);
+  assert.equal(edited.planning.location, '教室'); assert.equal(edited.planning.listName, '学习');
+  assert.equal(edited.planning.plannedDate, '2026-10-11'); assert.equal(edited.planning.deadlineMode, 'none');
+});
+test('Weekly finite counts exclude selected weekdays before a midweek anchor', () => {
+  const task = modern('r', '2026-10-14', -1, 30, 'task', { repeat: 'weekly' });
+  task.planning.rule.interval = 2; task.planning.rule.weekdays = [1, 5]; task.planning.rule.count = 3;
+  for (const day of ['2026-10-16', '2026-10-26', '2026-10-30']) assert.equal(Calendar.occursOn(task, day), true);
+  assert.equal(Calendar.nextDate(task, '2026-10-31'), '');
+});
+test('Version 5 backups round-trip independent deadlines, events, lists, recurrence and cross-midnight time', async () => {
+  const task = modern('a', '2026-10-10', 1410, 90, 'event', { repeat: 'weekly' }); task.planning.rule.weekdays = [2, 6]; task.planning.rule.count = 8;
+  task.planning.listName = '学习'; task.planning.location = '教室 101';
+  const doc = Backup.decode(Backup.encode([task], [], 200)); assert.equal(doc.version, 5);
+  const f = repositoryFixture(); await f.repo.load(f.context); await f.repo.mergeBackup(doc);
+  assert.deepEqual(plain((await f.newRepo().load(f.context))[0]), plain(task)); f.db.close();
+});
+test('Planning migration is idempotent, preserves old deadline semantics and rolls back failed markers', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const old = S.create(draft({ dueAt: S.endOfDay(2026, 9, 10), startMinute: 600, durationMinutes: 60 }), 'old', 5);
+  await f.repo.save(old); f.db.exec("DELETE FROM task_planning; DELETE FROM metadata WHERE key='planning_schema'");
+  f.fail('INSERT OR IGNORE INTO task_planning'); await assert.rejects(() => f.newRepo().load(f.context));
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM task_planning').get().n, 0);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM metadata WHERE key='planning_schema'").get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n, 1);
+  f.fail(''); const [upgraded] = await f.newRepo().load(f.context);
+  assert.equal(upgraded.planning.legacyTimeSemantics, true); assert.equal(upgraded.planning.deadlineAt, new Date(2026, 9, 10, 11).getTime());
+  await f.newRepo().load(f.context); assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM task_planning').get().n, 1); f.db.close();
+});
+test('Changing a recorded modern series rule cannot erase history', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context);
+  const task = modern('r', '2026-10-10', -1, 30, 'task', { repeat: 'daily' }); await f.repo.save(task); await f.repo.setOccurrence(state('r', '2026-10-10'));
+  const changed = plain(task); changed.planning.rule.interval = 2;
+  await assert.rejects(() => f.repo.save(changed), /已有历史/);
+  assert.equal((await f.repo.getOccurrences()).length, 1); assert.equal((await f.repo.reload())[0].planning.rule.interval, 1); f.db.close();
+});
+test('Preferences validate and persist across repository instances without resetting tasks', async () => {
+  const f = repositoryFixture(); await f.repo.load(f.context); await f.repo.save(modern('a'));
+  const prefs = { ...Plan.defaults(), calendarView: 'week', weekStart: 0, startPage: 1, showCompleted: true, useMaterial: false };
+  await f.repo.setPreferences(prefs); const repo = f.newRepo(); await repo.load(f.context);
+  assert.deepEqual(plain(await repo.getPreferences()), plain(prefs)); assert.equal((await repo.reload()).length, 1);
+  await assert.rejects(() => repo.setPreferences({ ...prefs, calendarView: 'bad' })); f.db.close();
+});
 
 test('Today overview counts only today plans and groups urgency without duplication', () => {
   const now = new Date(2026, 9, 10, 12).getTime();
@@ -177,7 +343,7 @@ test('A failed task/tag update is atomic; original task and tags remain', async 
   await assert.rejects(() => f.repo.save(S.edit(old, draft({ title: '新标题', tagsText: '新标签' }), 5)));
   f.fail('');
   const [actual] = await f.newRepo().load(f.context);
-  assert.deepEqual(plain(actual), plain(old));
+  assert.deepEqual(plain(actual), plain({ ...old, planning: Plan.forTask(old) }));
   f.db.close();
 });
 test('CRUD persists tags/dates/emoji/quotes and deletion removes associated tags', async () => {
@@ -212,7 +378,7 @@ const state = (taskId, dateKey, completed = true, skipped = false) => ({ taskId,
 
 test('Recurrence requires an anchor and rejects unknown rules and invalid dates', () => {
   assert.throws(() => S.create(draft({ repeat: 'daily' }), 'r', 1));
-  assert.throws(() => S.create(draft({ repeat: 'yearly', dueAt: date('2026-10-10') }), 'r', 1));
+  assert.throws(() => S.create(draft({ repeat: 'hourly', dueAt: date('2026-10-10') }), 'r', 1));
   assert.throws(() => S.create(draft({ dueAt: 1e100 }), 'r', 1));
   assert.equal(Calendar.validKey('2026-02-30'), false);
 });
@@ -329,7 +495,7 @@ test('Backup round-trip includes rules, tags, order and occurrence states', () =
 test('Backup validation rejects duplicates, unknown rules and orphan or invalid occurrence records', () => {
   const task = makeRepeat('weekly', '2026-10-12');
   for (const [tasks, states] of [
-    [[task, task], []], [[{ ...task, repeat: 'yearly' }], []], [[task], [state('missing', '2026-10-12')]],
+    [[task, task], []], [[{ ...task, repeat: 'hourly' }], []], [[task], [state('missing', '2026-10-12')]],
     [[task], [state('r', '2026-10-13')]], [[task], [state('r', '2026-10-12'), state('r', '2026-10-12')]],
     [[{ ...task, tags: ['a', 'a'] }], []], [[{ ...task, dueAt: 'tomorrow' }], []]
   ]) assert.throws(() => Backup.decode(Backup.encode(tasks, states, 100)));
@@ -383,7 +549,7 @@ test('Timed tasks validate minutes and do not cross midnight; deadlines use the 
   assert.equal(new Date(S.deadline(task, task.dueAt)).getHours(), 15);
   assert.equal(S.isOverdue(task, S.deadline(task, task.dueAt) + 1), true);
   assert.equal(S.isOverdue(task, S.deadline(task, task.dueAt) - 1), false);
-  assert.equal(S.timeLabel(S.create({ ...valid, startMinute: 1435, durationMinutes: 5 }, 'end', 1)), '23:55–24:00');
+  assert.equal(S.timeLabel(S.create({ ...valid, startMinute: 1435, durationMinutes: 5 }, 'end', 1)), '23:55–次日 00:00');
   for (const bad of [{ startMinute: -2 }, { startMinute: 1440 }, { startMinute: 1.5 }, { durationMinutes: 0 },
     { durationMinutes: 1441 }, { durationMinutes: 5.5 }, { startMinute: 1439, durationMinutes: 5 }, { dueAt: 0 }]) {
     assert.throws(() => S.create({ ...valid, ...bad }, 'bad', 1));
@@ -516,7 +682,7 @@ test('Version 4 backups preserve time and checklists; version 3 still imports wi
   const f = repositoryFixture(); await f.repo.load(f.context);
   const task = S.create(draft({ repeat: 'daily', dueAt: date('2026-10-10'), startMinute: 720, stepsText: '读\n写' }), 'r', 1);
   const doc = Backup.decode(Backup.encode([task], [{ ...state('r', '2026-10-10'), doneSteps: [1] }], 100));
-  assert.equal(doc.version, 4); await f.repo.mergeBackup(doc);
+  assert.equal(doc.version, 5); await f.repo.mergeBackup(doc);
   assert.equal((await f.repo.reload())[0].startMinute, 720); assert.deepEqual(plain((await f.repo.getOccurrences())[0].doneSteps), [1]);
   const old = { ...makeRepeat('weekly', '2026-10-12', 'old') };
   for (const key of ['startMinute', 'durationMinutes', 'steps', 'doneSteps']) delete old[key];

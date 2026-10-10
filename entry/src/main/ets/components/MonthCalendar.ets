@@ -4,6 +4,7 @@ import { CalendarDay } from '../model/Task';
 export struct MonthCalendar {
   @Prop days: CalendarDay[] = [];
   @Prop selected: string = '';
+  @Prop weekStart: number = 1;
   @Prop month: string = '';
   onSelect: (key: string) => void = () => {};
   onMonth: (delta: number) => void = () => {};
@@ -21,7 +22,7 @@ export struct MonthCalendar {
           .fontColor($r('app.color.accent')).accessibilityText('下个月').onClick(() => this.onMonth(1))
       }.width('100%')
       Row() {
-        ForEach(['一', '二', '三', '四', '五', '六', '日'], (day: string) => {
+        ForEach(this.weekStart === 1 ? ['一', '二', '三', '四', '五', '六', '日'] : ['日', '一', '二', '三', '四', '五', '六'], (day: string) => {
           Text(day).layoutWeight(1).textAlign(TextAlign.Center).fontSize(12).fontColor($r('app.color.text_secondary'))
         })
       }

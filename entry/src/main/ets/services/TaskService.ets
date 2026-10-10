@@ -1,3 +1,4 @@
+import { PlanningService } from './PlanningService';
 import { LegacyDocument, LegacyTask, Task, TaskDraft } from '../model/Task';
 
 // 纯业务函数不依赖 ArkUI 或数据库，跨平台可用相同案例验证。
@@ -12,9 +13,10 @@ export class TaskService {
   }
   static timeLabel(task: Task): string {
     const start = task.startMinute ?? -1;
-    return start < 0 ? '全天' : `${TaskService.minuteLabel(start)}–${TaskService.minuteLabel(start + (task.durationMinutes ?? 30))}`;
+    return start < 0 ? (task.planning?.kind === 'event' ? '全天' : '未指定时间') : `${TaskService.minuteLabel(start)}–${((start + (task.durationMinutes ?? 30)) >= 1440 ? '次日 ' : '') + TaskService.minuteLabel((start + (task.durationMinutes ?? 30)) % 1440)}`;
   }
   static deadline(task: Task, day: number): number {
+    if (task.planning) { return PlanningService.deadline(task, day); }
     if (day === 0 || (task.startMinute ?? -1) < 0) { return day; }
     const date = new Date(day);
     date.setHours(0, (task.startMinute ?? 0) + (task.durationMinutes ?? 30), 0, 0);
@@ -46,22 +48,36 @@ export class TaskService {
     if (![0, 1, 2].includes(draft.priority)) { throw new Error('请选择有效的优先级'); }
     if (!Number.isFinite(draft.dueAt) || draft.dueAt < 0 || draft.dueAt > 4133980799999) { throw new Error('截止日期无效'); }
     const repeat = draft.repeat ?? 'none';
-    if (!['none', 'daily', 'weekly', 'monthly'].includes(repeat)) { throw new Error('重复规则无效'); }
+    if (!['none', 'daily', 'weekly', 'monthly', 'yearly'].includes(repeat)) { throw new Error('重复规则无效'); }
     if (repeat !== 'none' && draft.dueAt === 0) { throw new Error('请先选择重复任务的起始日期'); }
     const start = draft.startMinute ?? -1;
     const duration = draft.durationMinutes ?? 30;
     if (!Number.isInteger(start) || start < -1 || start > 1439 || !Number.isInteger(duration) || duration < 5 || duration > 1440) {
       throw new Error('开始时间无效，时长需为 5～1440 分钟');
     }
-    if (start >= 0 && (draft.dueAt === 0 || start + duration > 1440)) { throw new Error('请先选择日期，且时间安排不能跨过当天 24:00'); }
-    return { id: id, title: title, note: draft.note.trim(), completed: false,
+    if (start >= 0 && (draft.dueAt === 0 || (!draft.planning && start + duration > 1440))) { throw new Error('请先选择日期，且时间安排不能跨过当天 24:00'); }
+    if (draft.planning !== undefined) { PlanningService.validate(draft.planning, draft.dueAt, start, duration, repeat); }
+    const result: Task = { id: id, title: title, note: draft.note.trim(), completed: false,
       createdAt: now, updatedAt: now, priority: draft.priority,
       tags: TaskService.parseTags(draft.tagsText), dueAt: draft.dueAt, repeat: repeat, sortOrder: -now,
       startMinute: start, durationMinutes: duration, steps: TaskService.parseSteps(draft.stepsText ?? ''), doneSteps: [] };
+    if (draft.planning) { result.planning = JSON.parse(JSON.stringify(draft.planning)); }
+    return result;
   }
   static edit(task: Task, draft: TaskDraft, now: number): Task {
-    const next = TaskService.create(draft, task.id, task.createdAt);
-    next.completed = task.completed;
+    const effective: TaskDraft = { title: draft.title, note: draft.note, priority: draft.priority,
+      tagsText: draft.tagsText, dueAt: draft.dueAt, repeat: draft.repeat, startMinute: draft.startMinute,
+      durationMinutes: draft.durationMinutes, stepsText: draft.stepsText, planning: draft.planning };
+    if (task.planning && draft.planning === undefined) {
+      const plan = PlanningService.forTask(task);
+      const updated = PlanningService.create(draft.dueAt, draft.startMinute ?? -1, draft.durationMinutes ?? 30, plan.kind);
+      plan.scheduleMode = updated.scheduleMode; plan.plannedDate = updated.plannedDate;
+      plan.startAt = updated.startAt; plan.endAt = updated.endAt;
+      if ((draft.repeat ?? 'none') === 'none') { plan.rule = PlanningService.emptyRule(); }
+      effective.planning = plan;
+    }
+    const next = TaskService.create(effective, task.id, task.createdAt);
+    next.completed = PlanningService.isEvent(next) ? false : task.completed;
     next.updatedAt = now;
     next.sortOrder = task.sortOrder;
     if (JSON.stringify(next.steps) === JSON.stringify(task.steps ?? [])) { next.doneSteps = (task.doneSteps ?? []).slice(); }
@@ -72,11 +88,13 @@ export class TaskService {
     return TaskService.withCompletion(task, !task.completed, now);
   }
   static withCompletion(task: Task, completed: boolean, now: number): Task {
-    return { id: task.id, title: task.title, note: task.note, completed: completed,
+    const result: Task = { id: task.id, title: task.title, note: task.note, completed: completed,
       createdAt: task.createdAt, updatedAt: now, priority: task.priority,
       tags: task.tags.slice(), dueAt: task.dueAt, repeat: task.repeat, sortOrder: task.sortOrder,
       startMinute: task.startMinute ?? -1, durationMinutes: task.durationMinutes ?? 30,
       steps: (task.steps ?? []).slice(), doneSteps: (task.doneSteps ?? []).slice() };
+    if (task.planning) { result.planning = PlanningService.forTask(task); }
+    return result;
   }
   static section(tasks: Task[], completed: boolean, query: string = '', tag: string = ''): Task[] {
     const keyword = query.trim().toLocaleLowerCase();
@@ -94,7 +112,7 @@ export class TaskService {
   }
   static priorityLabel(priority: number): string { return ['低', '中', '高'][priority]; }
   static dateLabel(dueAt: number): string {
-    if (dueAt === 0) { return '不设置截止日期'; }
+    if (dueAt === 0) { return '未安排日期'; }
     const date = new Date(dueAt);
     return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
   }
@@ -102,7 +120,7 @@ export class TaskService {
     return new Date(year, month, day, 23, 59, 59, 999).getTime();
   }
   static isOverdue(task: Task, now: number): boolean {
-    return !task.completed && task.dueAt > 0 && TaskService.deadline(task, task.dueAt) < now;
+    return PlanningService.overdue(task, task.dueAt, task.completed, now);
   }
   static migrateLegacy(raw: string): Task[] {
     if (raw.length === 0) { return []; }
