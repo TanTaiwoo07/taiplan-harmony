@@ -28,19 +28,55 @@
 
 事项可以先放进无日期收集箱，再安排日期或精确时间；安排时间与截止期限分别保存。工具可按个人偏好隐藏。
 
-## 在本机运行
+## 下载源码并在模拟器运行
 
-1. 安装 DevEco Studio 与 API 26 手机模拟器镜像，在 Device Manager 启动模拟器。
-2. 克隆本私有仓库（需要访问权限），或解压源码归档。
-3. 在项目根目录执行，按实际安装路径和设备编号调整参数：
+本项目是鸿蒙原生应用。目标是让其他人下载源码后，在自己的 API 26 手机模拟器里编译运行；不需要购买 AI 服务或填写密钥才能使用基础功能。
+
+### 下载
+
+- [下载最新源码 ZIP](https://github.com/TanTaiwoo07/taiplan-harmony/archive/refs/heads/main.zip)，解压到普通可写目录。
+- 或使用 Git：`git clone https://github.com/TanTaiwoo07/taiplan-harmony.git`。
+- 要复现固定的 1.0.1 图标版，可选择 `archive/v1.0.1-icons` 分支；旧版本归档保持独立。
+
+ZIP 里不会包含本机数据库、用户任务、密钥、签名证书、依赖缓存与构建产物。依赖由开发工具在首次打开或构建时准备。
+
+### 推荐方式：DevEco Studio
+
+1. 安装支持 **HarmonyOS API 26.0.0** 的 DevEco Studio、对应 SDK 和手机模拟器镜像。首次下载 SDK / 镜像需要网络，请自行阅读并处理官方许可。
+2. 在 DevEco Studio 中打开解压后的**工程根目录**：包含 `build-profile.json5`、`oh-package.json5` 和 `entry/` 的文件夹，不是仅打开 `entry/`。
+3. 等待工程同步、依赖安装完成。如果提示缺少 SDK，先在 SDK Manager 安装 API 26。
+4. 在 Device Manager 创建并启动 API 26 手机模拟器。
+5. 选择 `entry` 运行配置和已启动的模拟器，点击 **Run**。应用入口是 `EntryAbility`，包名为 `com.taiwoo.taiplan`。
+
+本项目没有外部业务依赖；使用 DevEco 自带的 Node、JBR、ohpm 与 hvigor 即可。基础待办、日历和离线输入无需 API Key。云端 AI 单独在应用设置中配置。
+
+### Windows 命令行方式
+
+先启动模拟器，再在工程根目录运行。将 DevEco 安装路径和设备编号换成对方电脑上的实际值：
 
 ```powershell
+# 查询已启动模拟器的设备编号
+& 'D:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe' list targets
+
+# 安装依赖、编译、覆盖安装并打开应用
 ./tools/run-emulator.ps1 -Build -DevEcoHome 'D:\Program Files\Huawei\DevEco Studio' -Device '127.0.0.1:5555'
 ```
 
-脚本使用 DevEco 自带 Node、JBR 和 SDK，缺少依赖时安装 ohpm 依赖；覆盖安装保留应用数据。也可使用 DevEco Studio 打开工程后运行 EntryAbility。
+脚本使用 DevEco 自带工具。覆盖安装保留应用数据；首次下载源码必须加 `-Build`，不能直接双击只安装已有 HAP 的 `Start-TaiPlan.cmd`。若 Windows 拒绝执行脚本，可优先采用上面的 IDE 方式。
 
-这是原生应用，通过模拟器窗口操作，没有 localhost 网页地址。未签名 HAP 只用于本机模拟器；真机安装与上架需签名和另行验收。
+### 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| SDK / 编译 API 找不到 | 安装 API 26.0.0 SDK；不要只使用更低版本 SDK |
+| `Target missing` / `[Empty]` | 模拟器未启动，或 `-Device` 与 `hdc list targets` 的结果不同 |
+| 找不到 HAP / 源码比 HAP 更新 | 使用 `-Build` 重新编译 |
+| DevEco 路径不存在 | 将 `-DevEcoHome` 改为自己的 IDE 安装目录 |
+| 语音、系统提醒不可用 | 属于设备能力或权限限制；不影响基础任务保存 |
+
+**复现验证：**已使用与 GitHub 当前源码树一致的纯源码副本（没有依赖和构建缓存）完成 API 26 原生编译，生成未签名 HAP。应用运行与部分交互此前已在本机模拟器验收。对方仍需具备上述开发环境。
+
+这是通过模拟器窗口操作的原生应用，没有 localhost 网页地址，也不能直接在 GitHub 网页上使用。未签名 HAP 用于本机模拟器；真机安装与应用商店上架需要签名和另行验收。
 
 ## 验证
 
