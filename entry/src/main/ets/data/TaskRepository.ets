@@ -1,3 +1,4 @@
+import { IcsUpdateService } from '../services/IcsUpdateService';
 import { ScheduleService } from '../services/ScheduleService';
 import { ProductState } from '../model/Product';
 import { ProductService } from '../services/ProductService';
@@ -308,6 +309,28 @@ export class TaskRepository {
       db.commit();
     } catch (error) { db.rollBack(); throw error as Error; }
     return incoming.length;
+  }
+
+  async importCalendar(document: BackupDocument, updateIds: string[], expected: string): Promise<number> {
+    const doc = BackupService.decode(JSON.stringify(document)); const db = this.store;
+    if (!db || doc.product || doc.settings) { throw new Error('日历导入状态无效'); }
+    const current = await this.readTasks(db); const states = await this.getOccurrences();
+    if (JSON.stringify([current, states]) !== expected) { throw new Error('预览后数据已变化，请重新导入；没有覆盖'); }
+    const preview = IcsUpdateService.preview(doc, current, states);
+    if (new Set(updateIds).size !== updateIds.length || updateIds.some((id: string) => !preview.eligible.includes(id))) { throw new Error('有完成记录或例外的日历不能覆盖更新'); }
+    const ids: string[] = []; db.beginTransaction();
+    try {
+      for (const task of doc.tasks) {
+        const old = current.find((item: Task) => item.id === task.id);
+        if (old && !updateIds.includes(task.id)) { continue; }
+        const next = JSON.parse(JSON.stringify(task)) as Task;
+        if (old) { next.createdAt = old.createdAt; next.sortOrder = old.sortOrder; next.updatedAt = Date.now(); }
+        await this.writeTask(db, next); ids.push(next.id);
+      }
+      for (const state of doc.occurrences) { if (ids.includes(state.taskId)) { await this.writeOccurrence(db, state); } }
+      db.commit();
+    } catch (error) { db.rollBack(); throw error as Error; }
+    return ids.length;
   }
 
   async getProduct(): Promise<ProductState> {

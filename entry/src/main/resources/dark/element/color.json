@@ -31,6 +31,34 @@
     {
       "name": "chip_background",
       "value": "#303034"
+    },
+    {
+      "name": "support_accent",
+      "value": "#95C9B8"
+    },
+    {
+      "name": "accent_soft",
+      "value": "#253B35"
+    },
+    {
+      "name": "hero_start",
+      "value": "#203630"
+    },
+    {
+      "name": "hero_end",
+      "value": "#262832"
+    },
+    {
+      "name": "glass_surface",
+      "value": "#DD24272A"
+    },
+    {
+      "name": "glass_line",
+      "value": "#224E625B"
+    },
+    {
+      "name": "glass_shadow",
+      "value": "#40000000"
     }
   ]
 }

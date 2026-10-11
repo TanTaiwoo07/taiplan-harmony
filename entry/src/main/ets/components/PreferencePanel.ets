@@ -4,6 +4,7 @@ import { MaterialService } from '../services/MaterialService';
 
 @Component
 export struct PreferencePanel {
+  @Prop appearanceOnly: boolean = false;
   @Prop settings: AppPreferences = PlanningService.defaults();
   onChange: (value: AppPreferences) => void = () => {};
   private change(key: string, value: number | string | boolean): void {
@@ -13,12 +14,14 @@ export struct PreferencePanel {
     else if (key === 'week') { next.weekStart = value as number; }
     else if (key === 'done') { next.showCompleted = value as boolean; }
     else if (key === 'material') { next.useMaterial = value as boolean; }
+    else if (key === 'motion') { next.reduceMotion = value as boolean; }
     else if (key === 'snap') { next.snapMinutes = value as number; }
     this.onChange(next);
   }
   build() {
     Column({ space: 12 }) {
-      Text('显示与操作偏好').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+      Text(this.appearanceOnly ? '材质与动效' : '显示与操作偏好').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+      if (!this.appearanceOnly) {
       Text('启动时打开').fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
       Row({ space: 6 }) {
         ForEach([0, 1, 2], (page: number) => {
@@ -44,12 +47,18 @@ export struct PreferencePanel {
         Text('默认展开已完成').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
         Toggle({ type: ToggleType.Switch, isOn: this.settings.showCompleted }).selectedColor($r('app.color.accent')).onChange((value: boolean) => this.change('done', value))
       }.constraintSize({ minHeight: 48 })
+      }
+      if (this.appearanceOnly) {
       Row() {
         Text('原生沉浸材质').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
         Toggle({ type: ToggleType.Switch, isOn: this.settings.useMaterial }).selectedColor($r('app.color.accent')).onChange((value: boolean) => this.change('material', value))
       }.constraintSize({ minHeight: 48 })
-      Text(MaterialService.supported() ? '用于快速收集面板，效果跟随设备策略。' : '当前设备使用清晰的实色面板；支持材质的设备自动适配。')
+      Row() { Text('减少动态效果').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
+        Toggle({ type: ToggleType.Switch, isOn: this.settings.reduceMotion ?? false }).selectedColor($r('app.color.accent')).onChange((value: boolean) => this.change('motion', value))
+      }.constraintSize({ minHeight: 48 })
+      Text(MaterialService.supported() ? '底栏与收集面板使用原生光感材质；动效尊重系统减少动画设置。' : '当前设备使用毛玻璃回退；关闭材质可使用实色表面。动效尊重系统减少动画设置。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      }
     }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))
   }
 }

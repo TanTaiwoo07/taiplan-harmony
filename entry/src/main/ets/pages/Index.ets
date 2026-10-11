@@ -1,3 +1,8 @@
+import { IcsUpdateService } from '../services/IcsUpdateService';
+import { MotionService } from '../services/MotionService';
+import { AiPlanService, PlanReview } from '../services/AiPlanService';
+import { AiPlannerClient } from '../platform/AiPlannerClient';
+import { AiSecretStore } from '../platform/AiSecretStore';
 import { EditorOptionsService } from '../services/EditorOptionsService';
 import { AutoPlanService, PlanReport, PlanSuggestion } from '../services/AutoPlanService';
 import { ProductState } from '../model/Product';
@@ -32,12 +37,28 @@ import { MonthCalendar } from '../components/MonthCalendar';
 @Entry
 @Component
 struct Index {
+  @State private planEvaluation: string = '';
+  @State private planAdvice: string[] = [];
+  @State private planAdviceOpen: boolean = false;
+  @State private planSource: string = '本地建议';
+  @State private planCloudBusy: boolean = false;
+  @State private planCloudError: string = '';
+  private planner: AiPlannerClient = new AiPlannerClient();
+  private planRequest: number = 0;
+  private cancelPlanner(): void { this.planRequest++; this.planner.cancel(); this.planCloudBusy = false; }
+  private animate(action: () => void): void { this.getUIContext().animateTo(MotionService.options(this.preferences.reduceMotion), action); }
+  private setSearch(value: boolean): void { this.animate(() => { this.showSearch = value; this.searchPull = 0; if (!value) { this.query = ''; } }); }
+  @State private calendarImport: boolean = false;
+  @State private updateCalendarSource: boolean = false;
+  @State private calendarEligible: string[] = [];
+  private calendarImportSnapshot: string = '';
+  @State private searchPull: number = 0;
   @State private productTab: string = '';
   private backModes: string[] = [];
   private pullStartTop: boolean = false;
   private navigateBack(): void {
     this.getUIContext().getFocusController().clearFocus();
-    this.mode = this.backModes.pop() ?? 'list'; this.error = ''; this.notice = '';
+    this.cancelPlanner(); this.animate(() => { this.mode = this.backModes.pop() ?? 'list'; }); this.error = ''; this.notice = '';
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
   }
   private openDetail(item: TaskItem): void { this.detail = item; this.changeMode('detail'); }
@@ -61,27 +82,34 @@ struct Index {
   }
   private openProduct(tab: string): void { this.productTab = tab; this.changeMode('product'); }
   @Builder
+  toolEntry(title: string, subtitle: string, icon: Resource, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 14 }) {
+        Image(icon).width(28).height(28).margin(10).borderRadius(14).backgroundColor($r('app.color.accent_soft'))
+        Column({ space: 4 }) { Text(title).fontSize(17).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+          Text(subtitle).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%') }.layoutWeight(1)
+        Text('›').fontSize(22).fontColor($r('app.color.text_secondary'))
+      }.padding(16).width('100%')
+    }.width('100%').borderRadius(20).backgroundColor($r('app.color.card_background')).onClick(action)
+      .transition(MotionService.entrance(this.preferences.reduceMotion))
+  }
+  @Builder
   workbenchPage() {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 16 }) {
-        Row({ space: 12 }) { Text('✦').fontSize(32).fontColor($r('app.color.text_primary'))
-          Text('智能安排').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
-        }.width('100%')
-        Text('把收集箱的事情安排进空闲时间').fontSize(15).fontColor($r('app.color.text_secondary')).width('100%')
-        Text('本地生成建议 · 保留已有安排 · 确认后保存').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
-        Text('开始安排  →').fontSize(17).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+      Column({ space: 14 }) {
+        Row({ space: 14 }) { Image($r('app.media.icon_wand')).width(34).height(34)
+          Text('智能安排').fontSize(25).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')) }.width('100%')
+        Text('让每件事，找到合适的时间').fontSize(16).fontColor($r('app.color.text_primary')).width('100%')
+        Text('本地建议与 AI 优化，都先预览再确认').fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
+        Text('查看安排建议  →').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.support_accent')).width('100%')
       }.padding(24).width('100%')
-    }.width('100%').borderRadius(24).backgroundColor($r('app.color.card_background')).onClick(() => this.proposePlan())
-    if (this.product.features.ai) {
-      Button('✎  一句话创建 · 语音与 AI').height(56).width('100%').fontSize(16).borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onClick(() => this.changeMode('quick'))
-    }
-    Text('我的工具').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
-    if (this.product.features.focus) { Button('◷  专注 · 给一件事留段时间  ›').height(64).width('100%').fontSize(15).borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onClick(() => this.openProduct('focus')) }
-    if (this.product.features.habits) { Button('✓  习惯 · 记录日常坚持  ›').height(64).width('100%').fontSize(15).borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onClick(() => this.openProduct('habits')) }
-    if (this.product.features.countdowns) { Button('◇  倒数日 · 重要日子  ›').height(64).width('100%').fontSize(15).borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onClick(() => this.openProduct('countdowns')) }
-    if (!this.product.features.focus && !this.product.features.habits && !this.product.features.countdowns) { Text('需要时，可在设置里启用专注、习惯和倒数日。').fontSize(14).fontColor($r('app.color.text_secondary')).width('100%') }
-    Button('管理清单与标签  ›').height(52).width('100%').backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).onClick(() => this.changeMode('classification'))
-    Button('设置与数据管理  ›').height(52).width('100%').backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).onClick(() => this.changeMode('settings'))
+    }.width('100%').borderRadius(24).linearGradient({ angle: 135, colors: [[$r('app.color.hero_start'), 0], [$r('app.color.hero_end'), 1]] }).onClick(() => this.proposePlan())
+    if (this.product.features.ai) { this.toolEntry('一句话创建', '文字、语音或 AI · 核对后保存', $r('app.media.icon_wand'), () => this.changeMode('quick')) }
+    Text('我的工具').fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
+    if (this.product.features.focus) { this.toolEntry('专注', '给一件事留段不被打扰的时间', $r('app.media.icon_focus'), () => { this.productTab = 'focus'; this.changeMode('product'); }) }
+    if (this.product.features.habits) { this.toolEntry('习惯', '从小行动，积累日常坚持', $r('app.media.icon_habit'), () => { this.productTab = 'habits'; this.changeMode('product'); }) }
+    if (this.product.features.countdowns) { this.toolEntry('倒数日', '记住重要日子与纪念日', $r('app.media.icon_countdown'), () => { this.productTab = 'countdowns'; this.changeMode('product'); }) }
+    this.toolEntry('清单与标签', '整理学习、生活与其他事项', $r('app.media.nav_tasks'), () => this.changeMode('classification'))
   }
   @State private product: ProductState = ProductService.defaults();
   private productSaving: boolean = false;
@@ -187,7 +215,7 @@ struct Index {
     this.load();
     this.clockId = setInterval(() => { this.now = Date.now(); }, 60000);
   }
-  aboutToDisappear(): void { if (this.clockId !== -1) { clearInterval(this.clockId); } }
+  aboutToDisappear(): void { this.cancelPlanner(); if (this.clockId !== -1) { clearInterval(this.clockId); } }
   onPageShow(): void { this.now = Date.now(); }
   private context(): common.UIAbilityContext { return this.getUIContext().getHostContext() as common.UIAbilityContext; }
 
@@ -362,7 +390,7 @@ struct Index {
     if (mode === 'list') { this.backModes = []; }
     else if (mode !== this.mode) { this.backModes.push(this.mode); }
     this.getUIContext().getFocusController().clearFocus();
-    this.mode = mode; this.error = ''; this.notice = '';
+    if (this.mode !== mode) { this.cancelPlanner(); } this.animate(() => { this.mode = mode; }); this.error = ''; this.notice = '';
     this.scroller.scrollTo({ xOffset: 0, yOffset: 0 });
   }
   private changeView(view: string): void {
@@ -462,39 +490,85 @@ struct Index {
       ] });
   }
   private proposePlan(): void {
-    this.hasPlanUndo = false; this.planUndo = [];
-    this.planReport = AutoPlanService.suggest(this.tasks, this.states, Date.now(), this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes);
-    this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.changeMode('plan');
+    this.cancelPlanner(); this.hasPlanUndo = false; this.planUndo = []; this.planCloudError = ''; this.planAdviceOpen = false;
+    try {
+    const now = Date.now();
+    this.planReport = AutoPlanService.suggest(this.tasks, this.states, now, this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes);
+    const review = AiPlanService.local(AiPlanService.input(this.tasks, this.states, now, this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes), this.planReport);
+    this.planEvaluation = review.evaluation; this.planAdvice = review.advice; this.planSource = '本地建议';
+    this.planSnapshot = JSON.stringify([this.tasks, this.states]); if (this.mode !== 'plan') { this.changeMode('plan'); }
+    } catch (error) { this.error = (error as Error).message; }
+  }
+  private confirmAiPlan(): void {
+    if (this.planCloudBusy || this.busy) { return; }
+    try {
+      const input = AiPlanService.input(this.tasks, this.states, Date.now(), this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes);
+      if (!input.candidates.length) { this.planCloudError = '收集箱没有待安排事项，现有日程不会被 AI 移动。'; return; }
+      this.getUIContext().showAlertDialog({ title: '发送给 AI 优化？', message: '将发送本次最多20个收集箱任务的标题、优先级、预计时长和截止，以及未来7天的忙碌时间段。不会发送备注、地点、子任务、已完成记录或固定日程标题。\nAI返回评价和建议，只有你确认采用才会保存。',
+        primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '发送并预览', action: () => this.generateAiPlan() } });
+    } catch (error) { this.planCloudError = (error as Error).message; }
+  }
+  private async generateAiPlan(): Promise<void> {
+    this.cancelPlanner(); const request = this.planRequest; this.planCloudBusy = true; this.planCloudError = '';
+    try {
+      const now = Date.now(); const input = AiPlanService.input(this.tasks, this.states, now, this.product.workStart ?? 9, this.product.workEnd ?? 21, this.preferences.snapMinutes);
+      const snapshot = JSON.stringify([this.tasks, this.states]); const config = await AiConfigStore.load(this.context());
+      if (request !== this.planRequest || this.mode !== 'plan') { return; }
+      const key = await AiSecretStore.read(); if (!key) { throw new Error('请先到 AI 服务设置保存密钥；本地建议仍可使用。'); }
+      if (request !== this.planRequest || this.mode !== 'plan') { return; }
+      const result = await this.planner.generate(config.endpoint, config.model, key, input, this.tasks, this.states);
+      if (request !== this.planRequest || this.mode !== 'plan') { return; }
+      const current = await this.repository.reload(); const states = await this.repository.getOccurrences();
+      if (snapshot !== JSON.stringify([current, states])) { throw new Error('生成期间数据已变化，请重新规划；没有保存。'); }
+      this.animate(() => { this.planReport = result.report; this.planEvaluation = result.evaluation; this.planAdvice = result.advice; this.planAdviceOpen = false; this.planSource = 'AI 优化建议'; });
+      this.planSnapshot = snapshot; this.hasPlanUndo = false;
+    } catch (error) { if (request === this.planRequest) { this.planCloudError = (error as Error).message; } }
+    finally { if (request === this.planRequest) { this.planCloudBusy = false; } }
   }
   private async applyPlan(undo: boolean, id: string = ''): Promise<void> {
-    if (this.busy) { return; } this.busy = true;
+    if (this.busy || this.planCloudBusy) { return; } this.busy = true;
     try {
       const current = await this.repository.reload(), states = await this.repository.getOccurrences();
       if (JSON.stringify([current, states]) !== this.planSnapshot) { throw new Error('数据已变化，请重新生成建议'); }
       const chosen = this.planReport.suggestions.filter((item: PlanSuggestion) => !id || item.before.id === id);
+      if (!undo && chosen.some((item: PlanSuggestion) => (item.after.planning?.startAt ?? 0) <= Date.now())) { throw new Error('建议时间已经过去，请重新生成；没有保存'); }
       const replacement = undo ? this.planUndo : chosen.map(item => item.after);
       await this.repository.saveBatch(replacement);
       this.planUndo = undo ? [] : chosen.map(item => item.before); this.hasPlanUndo = !undo;
-      await this.refreshData(); this.planSnapshot = JSON.stringify([this.tasks, this.states]); this.planReport = { suggestions: [], unscheduled: [] };
+      await this.refreshData(); this.planSnapshot = JSON.stringify([this.tasks, this.states]);
+      this.planReport = { suggestions: undo ? [] : this.planReport.suggestions.filter((item: PlanSuggestion) => !chosen.some((selected: PlanSuggestion) => selected.before.id === item.before.id)), unscheduled: this.planReport.unscheduled };
       this.notice = undo ? '已撤销本次排程' : '已采用，原有日历事件未移动';
     } catch (error) { this.error = (error as Error).message; } finally { this.busy = false; }
   }
   @Builder
   planPage() {
-    Text('本地辅助排程').fontSize(20).fontColor($r('app.color.text_primary'))
-    Text('仅安排收集箱任务，未来 7 天 ' + (this.product.workStart ?? 9).toString() + ':00–' + (this.product.workEnd ?? 21).toString() + ':00，' + this.preferences.snapMinutes.toString() + ' 分钟网格；保留已有事件。默认时长 30 分钟，可先编辑时长。建议尚未保存，单条采用后可重新计算其余任务。').fontSize(13).fontColor($r('app.color.text_secondary'))
+    Column({ space: 10 }) {
+      Text(this.planSource).fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
+      Text(this.planEvaluation).fontSize(15).fontColor($r('app.color.text_primary')).width('100%')
+      ForEach(this.planAdviceOpen ? this.planAdvice : this.planAdvice.slice(0, 2), (text: string) => { Text('· ' + text).fontSize(13).lineHeight(20).fontColor($r('app.color.text_secondary')).width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) })
+      if (this.planAdvice.length > 2) { Button(this.planAdviceOpen ? '收起建议' : '展开其余 ' + (this.planAdvice.length - 2).toString() + ' 条建议').height(44).fontSize(13).backgroundColor(Color.Transparent).fontColor($r('app.color.support_accent')).onClick(() => this.animate(() => { this.planAdviceOpen = !this.planAdviceOpen; })) }
+    }.padding(20).width('100%').borderRadius(22).linearGradient({ angle: 135, colors: [[$r('app.color.hero_start'), 0], [$r('app.color.hero_end'), 1]] })
+    Text('未来7天 · ' + (this.product.workStart ?? 9).toString() + ':00–' + (this.product.workEnd ?? 21).toString() + ':00 · ' + this.preferences.snapMinutes.toString() + '分钟网格。下方安排尚未保存，固定日程保持不变。').fontSize(13).fontColor($r('app.color.text_secondary'))
+    if (this.product.features.ai) {
+      if (this.planCloudBusy) {
+        Row({ space: 12 }) { LoadingProgress().width(26).height(26).color($r('app.color.support_accent')); Text('AI 正在优化，原有安排未改变').fontSize(14).fontColor($r('app.color.text_secondary')).layoutWeight(1) }
+        Button('取消 AI 优化').height(48).onClick(() => this.cancelPlanner())
+      } else { Button('让 AI 优化并给出建议').height(52).width('100%').backgroundColor($r('app.color.accent_soft')).fontColor($r('app.color.support_accent')).onClick(() => this.confirmAiPlan()) }
+      if (this.planCloudError) { Text(this.planCloudError).fontSize(13).fontColor($r('app.color.danger')); Button('AI 服务设置').height(48).onClick(() => this.changeMode('aiConfig')) }
+    }
     ForEach(this.planReport.suggestions, (item: PlanSuggestion) => {
-      Column({ space: 6 }) {
-        Text(item.after.title).fontSize(16).fontColor($r('app.color.text_primary'))
-        Text('未安排 → ' + TaskService.dateLabel(item.after.dueAt) + ' ' + TaskService.timeLabel(item.after)).fontSize(13).fontColor($r('app.color.text_secondary'))
-        Text(item.reason).fontSize(12).fontColor($r('app.color.text_secondary'))
-        Button('只采用这一项').height(48).onClick(() => this.applyPlan(false, item.before.id))
-      }.padding(16).width('100%').borderRadius(16).backgroundColor($r('app.color.card_background'))
+      Column({ space: 8 }) {
+        Text(item.after.title).fontSize(17).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
+        Text('原来 · 收集箱，尚未安排').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+        Text('建议 · ' + TaskService.dateLabel(item.after.dueAt) + ' ' + TaskService.timeLabel(item.after)).fontSize(15).fontColor($r('app.color.support_accent')).width('100%')
+        Text(item.reason).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
+        Button('只采用这一项').height(48).width('100%').backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).enabled(!this.busy && !this.planCloudBusy).onClick(() => this.applyPlan(false, item.before.id))
+      }.padding(18).width('100%').borderRadius(20).backgroundColor($r('app.color.card_background')).transition(MotionService.entrance(this.preferences.reduceMotion))
     })
     ForEach(this.planReport.unscheduled, (reason: string) => { Text(reason).fontSize(13).fontColor($r('app.color.text_secondary')) })
-    Button('重新计算建议').height(48).onClick(() => this.proposePlan())
-    if (this.planReport.suggestions.length > 0) { Button('确认采用这些安排').height(48).onClick(() => this.applyPlan(false)) }
-    if (this.hasPlanUndo) { Button('撤销上次排程').height(48).onClick(() => this.applyPlan(true)) }
+    Button('重新生成本地建议').height(48).width('100%').backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.proposePlan())
+    if (this.planReport.suggestions.length > 0) { Button('确认采用这些安排').height(52).width('100%').backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).enabled(!this.busy && !this.planCloudBusy).onClick(() => this.applyPlan(false)) }
+    if (this.hasPlanUndo) { Button('撤销上次排程').height(48).width('100%').onClick(() => this.applyPlan(true)) }
   }
   private editSmartDraft(draft: TaskDraft): void {
     this.openEditor(); this.draftTitle = draft.title; this.draftNote = draft.note; this.draftPriority = draft.priority;
@@ -764,6 +838,7 @@ struct Index {
     try {
       const raw = await BackupFiles.importFile(this.context());
       if (raw === undefined) { return; }
+      this.calendarImport = false; this.updateCalendarSource = false; this.calendarEligible = [];
       const doc = BackupService.decode(raw);
       const count = doc.tasks.filter((task: Task) => !this.tasks.some((current: Task) => current.id === task.id)).length;
       this.pendingImport = doc;
@@ -779,10 +854,13 @@ struct Index {
     try {
       const raw = await BackupFiles.importFile(this.context(), 'ics');
       if (raw === undefined) { return; }
-      const report = IcsService.parse(raw, Date.now());
+      const report = IcsService.parse(raw, Date.now()); this.calendarImport = true; this.updateCalendarSource = false;
+      this.calendarImportSnapshot = JSON.stringify([this.tasks, this.states]);
+      const update = IcsUpdateService.preview(report.document, this.tasks, this.states); this.calendarEligible = update.eligible;
       this.pendingImport = BackupService.decode(JSON.stringify(report.document));
       const count = report.document.tasks.filter((task: Task) => !this.tasks.some((current: Task) => current.id === task.id)).length;
-      this.importSummary = `日历共 ${report.total} 条事件，可识别 ${report.document.tasks.length} 条，将新增 ${count} 个任务。已有 UID 保留本机版本。`;
+      this.importSummary = `日历共 ${report.total} 条事件，可识别 ${report.document.tasks.length} 条，将新增 ${count} 个任务。同 UID 默认保留本机版本；${update.eligible.length} 条可选择更新，${update.blocked.length} 条受完成记录保护。`;
+      report.notes.push(...update.blocked);
       this.importNotes = report.notes.join('\n');
     } catch (error) { this.error = '日历读取失败：' + (error as Error).message; }
     finally { this.busy = false; }
@@ -801,7 +879,7 @@ struct Index {
     this.busy = true;
     let committed = false;
     try {
-      const count = await this.repository.mergeBackup(this.pendingImport);
+      const count = this.calendarImport ? await this.repository.importCalendar(this.pendingImport, this.updateCalendarSource ? this.calendarEligible : [], this.calendarImportSnapshot) : await this.repository.mergeBackup(this.pendingImport);
       committed = true;
       this.pendingImport = undefined; this.importSummary = '';
       this.product = await this.repository.getProduct();
@@ -831,7 +909,7 @@ struct Index {
   }
   private pageTitle(): string {
     return this.mode === 'list' ? this.tabTitle(this.selectedTab) : this.mode === 'editor' ? (this.editingId ? '编辑任务' : '新建任务') :
-      this.mode === 'settings' ? '设置' : this.mode === 'aiConfig' ? 'AI 服务设置' : this.mode === 'detail' ? '事项详情' : this.mode === 'classification' ? '清单与标签' : this.mode === 'product' ? '我的工具' : this.mode === 'plan' ? '辅助排程' : this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
+      this.mode === 'settings' ? '设置' : this.mode === 'appearance' ? '外观与动效' : this.mode === 'preferences' ? '操作偏好' : this.mode === 'features' ? '功能与工具' : this.mode === 'notifications' ? '提醒与权限' : this.mode === 'about' ? '关于 TaiPlan' : this.mode === 'aiConfig' ? 'AI 服务设置' : this.mode === 'detail' ? '事项详情' : this.mode === 'classification' ? '清单与标签' : this.mode === 'product' ? '我的工具' : this.mode === 'plan' ? '辅助排程' : this.mode === 'search' ? '搜索全部内容' : this.mode === 'quick' ? '一句话识别' : this.mode === 'tools' ? '数据与恢复' : this.mode === 'sort' ? '任务排序' : '批量处理';
   }
   private calendarDays(): CalendarDay[] {
     return ScheduleService.month(this.tasks, this.states, this.month);
@@ -987,6 +1065,17 @@ struct Index {
 
   @Builder
   settingsPage() {
+    this.toolEntry('外观与动效', '深浅色、玻璃材质与减少动画', $r('app.media.icon_settings'), () => this.changeMode('appearance'))
+    this.toolEntry('操作偏好', '启动页面、日历尺度与时间吸附', $r('app.media.nav_calendar'), () => this.changeMode('preferences'))
+    this.toolEntry('功能与工具', '按自己的习惯，选择需要的功能', $r('app.media.nav_workbench'), () => this.changeMode('features'))
+    this.toolEntry('提醒与权限', '通知授权、登记状态与取消提醒', $r('app.media.icon_countdown'), () => this.changeMode('notifications'))
+    if (this.product.features.ai) { this.toolEntry('AI 服务', '服务地址、密钥与连接诊断', $r('app.media.icon_wand'), () => this.changeMode('aiConfig')) }
+    this.toolEntry('备份与日历互通', '备份恢复、课表和 ICS 导入导出', $r('app.media.icon_data'), () => this.changeMode('tools'))
+    this.toolEntry('关于 TaiPlan', '版本、作者与项目仓库', $r('app.media.icon_about'), () => this.changeMode('about'))
+    Text('TaiPlan 1.0').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%').textAlign(TextAlign.Center).margin({ top: 12, bottom: 12 })
+  }
+  @Builder
+  appearancePage() {
     Text('外观').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
     Column({ space: 12 }) {
       Text('显示模式').fontSize(15).fontColor($r('app.color.text_primary')).width('100%')
@@ -1001,9 +1090,10 @@ struct Index {
       Text('选择跟随系统，可自动使用设备的深浅色设置。')
         .fontSize(12).lineHeight(19).fontColor($r('app.color.text_secondary')).width('100%')
     }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))
-    this.preferenceSettings()
-    Button('管理清单与标签  ›').height(52).width('100%').onClick(() => this.changeMode('classification'))
-    ProductSettings({ state: this.product, onSave: (value: ProductState) => this.saveProduct(value), onOpen: () => this.changeMode('product') })
+    PreferencePanel({ appearanceOnly: true, settings: this.preferences, onChange: (value: AppPreferences) => this.savePreferences(value) })
+  }
+  @Builder
+  notificationsPage() {
     Column({ space: 8 }) {
       Text('系统提醒').fontSize(17).fontColor($r('app.color.text_primary')).width('100%')
       Text(this.reminderStatus).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
@@ -1017,16 +1107,38 @@ struct Index {
         catch { this.reminderStatus = '取消未完成，请稍后重试；不能保证旧提醒已取消'; }
       })
     }.padding(16).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background'))
-    if (this.product.features.ai) { Button('AI 服务配置  ›').height(52).width('100%').onClick(() => this.changeMode('aiConfig')) }
-    Text('数据').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%').margin({ top: 12 })
-    Button('备份、日历互通与恢复  ›', { type: ButtonType.Normal }).height(56).width('100%').fontSize(15)
-      .borderRadius(16).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary'))
-      .onClick(() => this.changeMode('tools'))
-    Column({ space: 8 }) {
-      Text('TaiPlan 0.9.0 · 交互重构预览').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
-      Text('待办是核心，日历帮助安排时间。\n任务保存在本机，建议定期导出备份。')
-        .fontSize(13).lineHeight(21).fontColor($r('app.color.text_secondary'))
-    }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 20, bottom: 16 })
+  }
+  @Builder
+  aboutPage() {
+    Column({ space: 16 }) {
+      Image($r('app.media.nav_workbench')).width(56).height(56)
+      Text('TaiPlan').fontSize(30).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary'))
+      Text('1.0.0 · HarmonyOS').fontSize(14).fontColor($r('app.color.text_secondary'))
+      Text('把想到的事记下来，把重要的事安排好。').fontSize(16).fontColor($r('app.color.text_primary'))
+      Text('作者：TaiWoo_Chen').fontSize(14).fontColor($r('app.color.text_primary'))
+      Text('使用 ArkTS、ArkUI 和 SQLite 构建。任务保存在本机，可通过备份迁移；AI 请求仅在你主动确认后发送。').fontSize(13).fontColor($r('app.color.text_secondary'))
+      Text('https://github.com/TanTaiwoo07/taiplan-harmony').fontSize(13).fontColor($r('app.color.support_accent')).copyOption(CopyOptions.LocalDevice)
+      Button('查看项目仓库').height(48).width('100%').backgroundColor($r('app.color.accent_soft')).fontColor($r('app.color.support_accent')).onClick(async () => {
+        try { await this.context().startAbility({ action: 'ohos.want.action.viewData', uri: 'https://github.com/TanTaiwoo07/taiplan-harmony' }); }
+        catch { this.notice = '无法打开浏览器，可长按上方地址复制；私有仓库需要访问权限。'; }
+      })
+      Text('私有项目仓库，访问需要相应权限。\n© 2026 TaiWoo_Chen').fontSize(12).fontColor($r('app.color.text_secondary'))
+    }.width('100%').padding(22).borderRadius(24).backgroundColor($r('app.color.card_background'))
+  }
+  @Builder
+  floatingDock() {
+    Row() {
+      ForEach([0, 1, 2, 3], (page: number) => {
+        Button({ type: ButtonType.Normal }) { this.tabLabel(page) }.layoutWeight(1).height(60).borderRadius(24)
+          .backgroundColor(this.selectedTab === page ? $r('app.color.accent_soft') : Color.Transparent)
+          .animation(MotionService.options(this.preferences.reduceMotion)).accessibilityText(this.tabTitle(page))
+          .onClick(() => { this.animate(() => { this.selectedTab = page; }); this.now = Date.now(); this.error = ''; this.notice = ''; })
+      })
+    }.padding(6).width('92%').height(72).margin({ top: 8, bottom: 12 }).borderRadius(30)
+      .backgroundColor(this.preferences.useMaterial ? $r('app.color.glass_surface') : $r('app.color.card_background'))
+      .backgroundEffect(this.preferences.useMaterial && !MaterialService.supported() ? { radius: 24, saturation: 1.1, brightness: 1 } : undefined)
+      .systemMaterial(MaterialService.surface(this.preferences.useMaterial))
+      .border({ width: 0.8, color: $r('app.color.glass_line') }).shadow({ radius: 18, color: $r('app.color.glass_shadow'), offsetY: 4 })
   }
 
   private pickLead(): void {
@@ -1068,7 +1180,7 @@ struct Index {
   @Builder
   fieldSwitch(label: string, on: boolean, action: (value: boolean) => void, enabled: boolean = true) {
     Row() { Text(label).fontSize(16).fontColor($r('app.color.text_primary')).layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: on }).selectedColor($r('app.color.accent')).enabled(enabled).onChange(action)
+      Toggle({ type: ToggleType.Switch, isOn: on }).selectedColor($r('app.color.accent')).enabled(enabled).onChange((value: boolean) => this.animate(() => action(value)))
     }.width('100%').height(52)
   }
   @Builder
@@ -1197,12 +1309,19 @@ struct Index {
         Button('导出 30 天日历').layoutWeight(1).height(44).fontSize(13).padding(4)
           .backgroundColor($r('app.color.card_background')).fontColor($r('app.color.accent')).onClick(() => this.exportCalendar())
       }.width('100%')
-      Text('ICS 导出为未来 30 天单次快照；导入支持常见重复、排除日期和单次调课。复杂规则或不支持的时区整组报告；已有 UID 不自动覆盖。')
+      Text('ICS 导出为未来 30 天单次快照；导入支持常见重复、RDATE、单次调课及 IANA 时区。同 UID 默认保留，可预览后更新无历史的来源事项；不支持的组合单独报告。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Text('备份包含任务、时间、子任务、标签、顺序和重复完成记录。兼容旧版备份；恢复时只合并新任务，已有同 ID 任务保留。')
         .fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
       if (this.importSummary.length > 0) {
         Text(this.importSummary).fontSize(14).fontColor($r('app.color.text_primary')).width('100%')
+        if (this.calendarImport && this.calendarEligible.length > 0) {
+          Row({ space: 12 }) {
+            Text('更新同来源日程（' + this.calendarEligible.length.toString() + ' 项）').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
+            Toggle({ type: ToggleType.Switch, isOn: this.updateCalendarSource }).onChange((value: boolean) => { this.updateCalendarSource = value; })
+          }.width('100%')
+          Text('默认保留原日程；开启后仅更新没有完成记录或单次修改的日历来源事项。').fontSize(12).fontColor($r('app.color.text_secondary'))
+        }
         Button('确认合并导入').height(46).width('100%').backgroundColor($r('app.color.accent'))
           .fontColor($r('app.color.on_accent')).onClick(() => this.confirmImport())
         Button('取消导入').backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_secondary'))
@@ -1296,11 +1415,14 @@ struct Index {
     if (this.showSearch) {
       Row() { Search({ value: this.query, placeholder: '搜索标题、备注、标签或地点' }).height(48).layoutWeight(1).id('globalSearch').onAppear(() => { this.getUIContext().getFocusController().requestFocus('globalSearch'); }).onChange((value: string) => { this.query = value; }).onSubmit(() => this.changeMode('search'))
         Button('搜索').height(48).backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).onClick(() => this.changeMode('search'))
-        Button('收起').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.showSearch = false; this.query = ''; }) }.padding({ left: 20, right: 20 }).width('100%')
+        Button('收起').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.setSearch(false); }) }.padding({ left: 20, right: 20 }).width('100%').transition(MotionService.entrance(this.preferences.reduceMotion))
     }
     Scroll() {
       Column({ space: 12 }) {
-        Text('下拉搜索全部事项').fontSize(11).fontColor($r('app.color.text_secondary')).width('100%').onClick(() => { this.showSearch = true; })
+        if (this.searchPull > 0 && !this.showSearch) {
+          Text(this.searchPull >= 28 ? '松开搜索' : '下拉搜索').fontSize(12).height(this.searchPull)
+            .opacity(Math.min(1, this.searchPull / 28)).fontColor($r('app.color.text_secondary')).width('100%')
+        }
         if (page === 0) { this.homePage() }
         else if (page === 1) {
           this.filters()
@@ -1313,7 +1435,7 @@ struct Index {
           if (this.calendarUndoLabel) {
             Button('撤销时间调整 · ' + this.calendarUndoLabel).height(44).width('100%').onClick(() => this.undoCalendarAdjustment())
           }
-          CalendarWorkspace({ tasks: this.tasks, states: this.states, selected: this.selectedDay, view: this.calendarView,
+          CalendarWorkspace({ reduceMotion: this.preferences.reduceMotion ?? false, tasks: this.tasks, states: this.states, selected: this.selectedDay, view: this.calendarView,
             weekStart: this.preferences.weekStart, snapMinutes: this.preferences.snapMinutes, now: this.now,
             onSelect: (day: string) => { this.selectedDay = day; this.month = day.slice(0, 7) + '-01'; },
             onAdjust: (item: TaskItem, days: number, minutes: number, resize: boolean) => this.adjustCalendar(item, days, minutes, resize),
@@ -1328,7 +1450,7 @@ struct Index {
       }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 24 })
     }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
       .onDidScroll((x: number, y: number) => { this.rootOffsets[page] = Math.max(0, this.rootOffsets[page] + y); })
-      .parallelGesture(PanGesture({ direction: PanDirection.Vertical }).onActionStart(() => { this.pullStartTop = this.rootOffsets[page] <= 1 && !(page === 2 && (this.calendarView === 'day' || this.calendarView === 'week')); }).onActionEnd((event: GestureEvent) => { if (this.pullStartTop && event.offsetY > 70) { this.showSearch = true; } }))
+      .parallelGesture(PanGesture({ direction: PanDirection.Vertical }).onActionStart(() => { this.pullStartTop = this.rootOffsets[page] <= 1 && !(page === 2 && (this.calendarView === 'day' || this.calendarView === 'week')); }).onActionUpdate((event: GestureEvent) => { if (this.pullStartTop && !this.showSearch) { this.searchPull = Math.max(0, Math.min(40, event.offsetY * 0.4)); } }).onActionEnd((event: GestureEvent) => { if (this.pullStartTop && event.offsetY > 70) { this.setSearch(true); } else { this.animate(() => { this.searchPull = 0; }); } }).onActionCancel(() => this.animate(() => { this.searchPull = 0; })))
     if (page !== 3) {
       Button('＋  记一件事').height(52).width('90%').fontSize(16).fontWeight(FontWeight.Medium)
         .backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).margin({ top: 8, bottom: 8 })
@@ -1378,14 +1500,10 @@ struct Index {
           }
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         if (this.mode === 'list') {
-          Button('⋯').width(48).height(48).fontSize(24).backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).accessibilityText('更多与搜索').onClick(() => {
-            this.getUIContext().showAlertDialog({ title: '更多', message: '选择操作', buttons: [
-              { value: '搜索全部事项', action: () => { this.query = ''; this.showSearch = true; this.changeMode('search'); } },
-              { value: '设置', action: () => this.changeMode('settings') }, { value: '取消', action: () => {} } ] });
-          })
-          if (this.selectedTab === 3) { Button('设置').width(60).height(48).fontSize(14).backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).accessibilityText('设置').onClick(() => this.changeMode('settings')) }
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.icon_settings')).width(24).height(24) }
+            .width(48).height(48).borderRadius(24).backgroundColor($r('app.color.card_background')).accessibilityText('设置').onClick(() => this.changeMode('settings'))
         }
-      }.width('100%').padding({ left: this.mode === 'list' ? 20 : 8, right: 20, top: 16, bottom: 14 }).parallelGesture(PanGesture({ direction: PanDirection.Vertical }).onActionEnd((event: GestureEvent) => { if (this.mode === 'list' && event.offsetY > 60) { this.showSearch = true; } }))
+      }.width('100%').padding({ left: this.mode === 'list' ? 20 : 8, right: 20, top: 16, bottom: 14 }).parallelGesture(PanGesture({ direction: PanDirection.Vertical }).onActionUpdate((event: GestureEvent) => { if (this.mode === 'list' && !this.showSearch) { this.searchPull = Math.max(0, Math.min(40, event.offsetY * 0.4)); } }).onActionEnd((event: GestureEvent) => { if (this.mode === 'list' && event.offsetY > 60) { this.setSearch(true); } else { this.animate(() => { this.searchPull = 0; }); } }).onActionCancel(() => this.animate(() => { this.searchPull = 0; })))
       if (this.error.length > 0) {
         Text(this.error).fontSize(13).fontColor($r('app.color.danger')).width('100%').padding({ left: 20, right: 20, bottom: 8 })
       }
@@ -1419,28 +1537,34 @@ struct Index {
           TabContent() { this.rootPage(1) }.tabBar(this.tabLabel(1))
           TabContent() { this.rootPage(2) }.tabBar(this.tabLabel(2))
           TabContent() { this.rootPage(3) }.tabBar(this.tabLabel(3))
-        }.layoutWeight(1).width('100%').barHeight(68).barMode(BarMode.Fixed).scrollable(false)
+        }.layoutWeight(1).width('100%').barHeight(0).animationDuration(MotionService.reduced(this.preferences.reduceMotion) ? 0 : 260).barMode(BarMode.Fixed).scrollable(false)
           .backgroundColor($r('app.color.page_background'))
-          .onChange((index: number) => { this.selectedTab = index; this.now = Date.now(); this.error = ''; this.notice = ''; })
+          .onChange((index: number) => { this.animate(() => { this.selectedTab = index; }); this.now = Date.now(); this.error = ''; this.notice = ''; })
+        this.floatingDock()
       } else {
         if (this.mode === 'sort') {
           Column() { this.sortingPage() }.layoutWeight(1).width('100%').padding({ left: 20, right: 20 })
         } else {
           Scroll(this.scroller) {
             Column({ space: 12 }) {
-              if (this.mode === 'editor') { this.editor() }
-              else if (this.mode === 'plan') { this.planPage() }
-              else if (this.mode === 'settings') { this.settingsPage() }
-              else if (this.mode === 'detail') { this.detailPage() }
-              else if (this.mode === 'aiConfig') { SmartEntry({ configOnly: true }) }
-              else if (this.mode === 'product') { ProductTools({ initialTab: this.productTab, state: this.product, tasks: this.tasks, reminderStatus: this.reminderStatus, onSave: (value: ProductState) => this.saveProduct(value) }) }
-              else if (this.mode === 'classification') { ClassificationPanel({ tasks: this.tasks, onRename: (kind: string, from: string, to: string) => this.renameClassification(kind, from, to) }) }
-              else if (this.mode === 'quick') { SmartEntry({ initialText: this.quickText, saving: this.busy, onOpenConfig: () => this.changeMode('aiConfig'), onTextChange: (value: string) => { this.quickText = value; }, onEdit: (draft: TaskDraft) => this.editSmartDraft(draft), onSave: (drafts: TaskDraft[]) => this.saveSmartDrafts(drafts) }) }
-              else if (this.mode === 'search') { this.searchPage() }
-              else if (this.mode === 'tools') { this.toolsPage() }
-              else if (this.mode === 'batch') { this.batchPage() }
+              if (this.mode === 'editor') { Column({ space: 12 }) { this.editor() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'plan') { Column({ space: 12 }) { this.planPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'settings') { Column({ space: 12 }) { this.settingsPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'appearance') { Column({ space: 12 }) { this.appearancePage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'preferences') { Column({ space: 12 }) { this.preferenceSettings() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'notifications') { Column({ space: 12 }) { this.notificationsPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'features') { Column({ space: 12 }) { ProductSettings({ state: this.product, onSave: (value: ProductState) => this.saveProduct(value), onOpen: () => this.changeMode('product') }) }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'about') { Column({ space: 12 }) { this.aboutPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'detail') { Column({ space: 12 }) { this.detailPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'aiConfig') { Column({ space: 12 }) { SmartEntry({ configOnly: true }) }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'product') { Column({ space: 12 }) { ProductTools({ initialTab: this.productTab, state: this.product, tasks: this.tasks, reminderStatus: this.reminderStatus, onSave: (value: ProductState) => this.saveProduct(value) }) }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'classification') { Column({ space: 12 }) { ClassificationPanel({ tasks: this.tasks, onRename: (kind: string, from: string, to: string) => this.renameClassification(kind, from, to) }) }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'quick') { Column({ space: 12 }) { SmartEntry({ initialText: this.quickText, saving: this.busy, onOpenConfig: () => this.changeMode('aiConfig'), onTextChange: (value: string) => { this.quickText = value; }, onEdit: (draft: TaskDraft) => this.editSmartDraft(draft), onSave: (drafts: TaskDraft[]) => this.saveSmartDrafts(drafts) }) }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'search') { Column({ space: 12 }) { this.searchPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'tools') { Column({ space: 12 }) { this.toolsPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
+              else if (this.mode === 'batch') { Column({ space: 12 }) { this.batchPage() }.width('100%').transition(MotionService.entrance(this.preferences.reduceMotion)) }
             }.width('100%').padding({ left: 20, right: 20, top: 8, bottom: 24 })
-          }.layoutWeight(1).width('100%').align(Alignment.Top)
+          }.layoutWeight(1).width('100%').align(Alignment.Top).transition(MotionService.entrance(this.preferences.reduceMotion))
         }
         this.subpageFooter()
       }
@@ -1449,4 +1573,3 @@ struct Index {
         backgroundColor: $r('app.color.card_background'), systemMaterial: MaterialService.surface(this.preferences.useMaterial) })
   }
 }
-

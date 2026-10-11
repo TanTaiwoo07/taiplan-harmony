@@ -75,9 +75,9 @@ export class PlanningService {
   }
   static isEvent(task: Task): boolean { return task.planning?.kind === 'event'; }
   static isInbox(task: Task): boolean { return !PlanningService.isEvent(task) && task.dueAt === 0 && !task.completed; }
-  static defaults(): AppPreferences { return { startPage: 0, calendarView: 'month', weekStart: 1, snapMinutes: 15, showCompleted: false, useMaterial: true }; }
+  static defaults(): AppPreferences { return { startPage: 0, calendarView: 'month', weekStart: 1, snapMinutes: 15, showCompleted: false, useMaterial: true, reduceMotion: false }; }
   static validatePreferences(value: AppPreferences): void {
     if (!value || ![0, 1, 2].includes(value.startPage) || !['year', 'month', 'week', 'day'].includes(value.calendarView) ||
-      ![0, 1].includes(value.weekStart) || ![5, 15, 30].includes(value.snapMinutes) || typeof value.showCompleted !== 'boolean' || typeof value.useMaterial !== 'boolean') { throw new Error('显示偏好无效'); }
+      ![0, 1].includes(value.weekStart) || ![5, 15, 30].includes(value.snapMinutes) || typeof value.showCompleted !== 'boolean' || typeof value.useMaterial !== 'boolean' || (value.reduceMotion !== undefined && typeof value.reduceMotion !== 'boolean')) { throw new Error('显示偏好无效'); }
   }
 }

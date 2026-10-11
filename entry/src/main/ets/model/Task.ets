@@ -66,6 +66,7 @@ export interface AppPreferences {
   snapMinutes: number;
   showCompleted: boolean;
   useMaterial: boolean;
+  reduceMotion?: boolean;
 }
 
 export interface OccurrenceState {

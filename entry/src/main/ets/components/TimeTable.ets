@@ -1,3 +1,4 @@
+import { MotionService } from '../services/MotionService';
 import { CalendarInteractionService } from '../services/CalendarInteractionService';
 import { Task, TaskItem, OccurrenceState } from '../model/Task';
 import { CalendarBlock, CalendarService } from '../services/CalendarService';
@@ -35,6 +36,7 @@ export struct TimeTable {
   private cacheTasks: Task[] | undefined = undefined;
   private cacheStates: OccurrenceState[] | undefined = undefined;
   private blockCache: Map<string, CalendarBlock[]> = new Map();
+  @Prop reduceMotion: boolean = false;
   @Prop now: number = Date.now();
   @Prop snapMinutes: number = 15;
   onEdit: (item: TaskItem) => void = () => {};
@@ -50,12 +52,15 @@ export struct TimeTable {
     let blocks = this.blockCache.get(day); if (!blocks) { blocks = CalendarService.blocks(this.tasks, this.states, day); this.blockCache.set(day, blocks); } return blocks;
   }
   private px(minutes: number): number { return minutes * this.hourHeight / 60; }
-  private zoom(height: number, center: number = 220): void {
+  private zoom(height: number, center: number = 220, live: boolean = false): void {
     if (this.dragKey) { return; }
     const next = CalendarInteractionService.height(height), offset = CalendarInteractionService.anchor(this.scroller.currentOffset().yOffset, center, this.hourHeight, next, 440);
-    this.hourHeight = next;
+    const duration = live || MotionService.reduced(this.reduceMotion) ? 0 : 280;
+    if (duration === 0) { this.hourHeight = next; }
+    else { this.getUIContext().animateTo(MotionService.options(this.reduceMotion), () => { this.hourHeight = next; }); }
+    this.scroller.scrollTo({ xOffset: 0, yOffset: offset, animation: { duration: duration, curve: Curve.EaseOut } });
     if (this.zoomTimer !== -1) { clearTimeout(this.zoomTimer); }
-    this.zoomTimer = setTimeout(() => { this.scroller.scrollTo({ xOffset: 0, yOffset: offset }); }, 0);
+    this.zoomTimer = setTimeout(() => { this.scroller.scrollTo({ xOffset: 0, yOffset: offset }); }, duration);
   }
   private beginDrag(block: CalendarBlock, resize: boolean): void {
     if (!resize && block.continuesBefore) { this.dragLabel = '跨日安排请从开始当天移动'; return; }
@@ -162,7 +167,7 @@ export struct TimeTable {
                         Text(this.dragLabel).fontSize(11).fontColor($r('app.color.text_secondary')).maxLines(2)
                       }.padding(6).width(this.columnWidth() - 6).height(Math.max(30, this.ghostHeight(block))).borderRadius(8)
                         .backgroundColor($r('app.color.card_background')).border({ width: 1.5, color: $r('app.color.accent') }).shadow({ radius: 8, color: '#22000000', offsetY: 3 })
-                        .position({ x: 3 + this.dragDays * this.columnWidth(), y: this.px(block.start + (this.dragResize ? 0 : this.dragMinutes)) }).zIndex(20).hitTestBehavior(HitTestMode.None)
+                        .position({ x: 3 + this.dragDays * this.columnWidth(), y: this.px(block.start + (this.dragResize ? 0 : this.dragMinutes)) }).animation({ duration: MotionService.reduced(this.reduceMotion) ? 0 : 90, curve: Curve.EaseOut }).zIndex(20).hitTestBehavior(HitTestMode.None)
                     }
                   }, (block: CalendarBlock) => JSON.stringify(block))
                   if (day === ScheduleService.key(this.now)) {
@@ -189,7 +194,7 @@ export struct TimeTable {
         }.height(440).width(44).clip(true).backgroundColor($r('app.color.card_background'))
       }.width(44).hitTestBehavior(HitTestMode.None)
       }.width('100%').onAreaChange((oldArea: Area, area: Area) => { this.viewportTop = Number(area.globalPosition.y) + 40; this.viewportLeft = Number(area.globalPosition.x); this.viewportWidth = Number(area.width); })
-        .parallelGesture(PinchGesture().onActionStart(() => { this.pinchHeight = this.hourHeight; }).onActionUpdate((event: GestureEvent) => this.zoom(this.pinchHeight * event.scale, Math.max(0, event.pinchCenterY - 40))))
+        .parallelGesture(PinchGesture().onActionStart(() => { this.pinchHeight = this.hourHeight; }).onActionUpdate((event: GestureEvent) => this.zoom(this.pinchHeight * event.scale, Math.max(0, event.pinchCenterY - 40), true)))
     }.padding(10).borderRadius(18).backgroundColor($r('app.color.card_background')).width('100%')
   }
 }

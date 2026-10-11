@@ -36,6 +36,8 @@ if ($targets -notcontains $Device) { throw "Start the API 26 emulator in DevEco 
 $result = & $hdc -t $Device install -r $hap
 Write-Output $result
 if ($LASTEXITCODE -ne 0 -or (($result -join ' ') -notmatch 'install bundle successfully')) { throw 'Install failed. Existing application data was not uninstalled.' }
+# Package-change callbacks can close a newly launched ability just after install.
+Start-Sleep -Seconds 2
 $result = & $hdc -t $Device shell aa start -a EntryAbility -b com.taiwoo.taiplan
 Write-Output $result
 if ($LASTEXITCODE -ne 0 -or (($result -join ' ') -notmatch 'start ability successfully')) { throw 'App launch failed.' }

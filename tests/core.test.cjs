@@ -1216,3 +1216,153 @@ test('Asset read error preserves classification while suppressing raw native det
   await assert.rejects(f.Secrets.read(),e=>e.code===24000001 && /不可用/.test(e.message) && !e.message.includes('private'));
   assert.match(await f.Secrets.status(),/不可用/);
 });
+
+const { AiPlanService: AiPlan } = loadModule('services/AiPlanService.ets');
+const { TimeZoneService: Zones } = loadModule('services/TimeZoneService.ets');
+const { IcsUpdateService: IcsUpdates } = loadModule('services/IcsUpdateService.ets');
+const planNow = new Date(2026,9,12,7).getTime();
+function planFixture() {
+ const a=modern('ai-a','',-1,30,'task',{priority:2,stepsText:'准备\n检查',note:'PRIVATE NOTE'});
+ a.planning.location='PRIVATE LOCATION';a.planning.deadlineMode='date';a.planning.deadlineAt=S.endOfDay(2026,9,12);
+ const fixed=modern('fixed','2026-10-12',600,60,'event',{title:'PRIVATE FIXED TITLE'});
+ const tasks=[a,fixed],input=AiPlan.input(tasks,[],planNow,8,18,15);
+ const response={evaluation:'先完成重要任务，再安排休息。',advice:['预留缓冲时间'],assignments:[{id:a.id,date:'2026-10-12',time:'08:00',reason:'临近截止'}],unscheduled:[]};
+ return {a,fixed,tasks,input,response};
+}
+test('AI planner sends minimal candidate fields and anonymous occupied intervals',()=>{
+ const f=planFixture(),raw=JSON.stringify(f.input);assert.equal(f.input.candidates.length,1);
+ for(const secret of ['PRIVATE NOTE','PRIVATE LOCATION','PRIVATE FIXED TITLE'])assert.equal(raw.includes(secret),false);
+ assert.deepEqual(plain(f.input.busy),[{date:'2026-10-12',start:600,end:660}]);
+});
+test('AI planner retains priority, checklist, deadline and metadata; only schedule changes',()=>{
+ const f=planFixture(),review=AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]),after=review.report.suggestions[0].after;
+ assert.equal(after.planning.startAt,new Date(2026,9,12,8).getTime());
+ assert.equal(after.priority,2);assert.deepEqual(plain(after.steps),plain(f.a.steps));assert.equal(after.note,f.a.note);
+ assert.equal(after.planning.location,f.a.planning.location);assert.equal(after.planning.deadlineAt,f.a.planning.deadlineAt);
+ assert.equal(Plan.isInbox(f.a),true);assert.equal(f.fixed.startMinute,600);
+});
+test('AI planner rejects collisions, past times, snap violations, dates and expired deadlines',()=>{
+ for(const patch of [{time:'10:00'},{time:'06:00'},{time:'08:07'},{time:'25:00'},{date:'2026-10-19'},{date:'2026-10-13'},{date:'2026-02-30'},{id:'fixed'}]) {
+  const f=planFixture();Object.assign(f.response.assignments[0],patch);assert.throws(()=>AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]));assert.equal(Plan.isInbox(f.a),true);
+ }
+});
+test('AI planner rejects duplicate IDs, overlapping proposed slots and incomplete membership',()=>{
+ const f=planFixture(),b=modern('ai-b');f.tasks.push(b);f.input=AiPlan.input(f.tasks,[],planNow,8,18,15);
+ f.response.assignments.push({...f.response.assignments[0]});assert.throws(()=>AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]));
+ f.response.assignments[1].id=b.id;assert.throws(()=>AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]));
+ f.response.assignments.pop();assert.throws(()=>AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]));
+ f.response.unscheduled=[{id:b.id,reason:'留出缓冲'}];assert.equal(AiPlan.decode(JSON.stringify(f.response),f.input,f.tasks,[]).report.unscheduled.length,1);
+});
+test('Malformed AI response never exposes raw provider text in parsing errors',()=>{
+ const f=planFixture();assert.throws(()=>AiPlan.decode('PRIVATE PROVIDER RESPONSE',f.input,f.tasks,[]),e=>!e.message.includes('PRIVATE'));
+ for(const value of [null,{}, {...f.response,assignments:[null]},{...f.response,advice:['x'.repeat(301)]}])assert.throws(()=>AiPlan.decode(JSON.stringify(value),f.input,f.tasks,[]));
+});
+test('Planner HTTP adapter supports full endpoints, cancellation and sanitized response failures',async()=>{
+ const f=planFixture();let resolve,options,url,destroys=0;
+ const request={request:(u,o)=>{url=u;options=o;return new Promise(r=>resolve=r)},destroy:()=>destroys++};
+ const { AiPlannerClient:Client }=loadModule('platform/AiPlannerClient.ets',{'@kit.NetworkKit':{http:{createHttp:()=>request,RequestMethod:{POST:'POST'},HttpDataType:{STRING:'STRING'}}}});
+ const client=new Client(),pending=client.generate('https://api.deepseek.com/chat/completions','test','sk-test-key-only',f.input,f.tasks,[]);
+ assert.equal(url,'https://api.deepseek.com/chat/completions');assert.equal(options.header.Authorization,'Bearer sk-test-key-only');assert.equal(options.usingCache,false);
+ client.cancel();resolve({responseCode:200,result:JSON.stringify({choices:[{message:{content:JSON.stringify(f.response)}}]})});await assert.rejects(pending,/已取消/);assert.ok(destroys>=1);
+ const bad=client.generate('https://api.deepseek.com','test','sk-test-key-only',f.input,f.tasks,[]);resolve({responseCode:200,result:'PRIVATE PROVIDER BODY'});await assert.rejects(bad,e=>!e.message.includes('PRIVATE'));
+ const good=client.generate('https://api.deepseek.com','test','sk-test-key-only',f.input,f.tasks,[]);resolve({responseCode:200,result:JSON.stringify({choices:[{message:{content:JSON.stringify(f.response)}}]})});assert.equal((await good).report.suggestions.length,1);
+});
+test('Time zone conversion preserves winter/summer offsets and selects first fall-back occurrence',()=>{
+ assert.equal(Zones.timestamp(2026,1,10,9,0,'America/New_York'),Date.UTC(2026,0,10,14));
+ assert.equal(Zones.timestamp(2026,7,10,9,0,'America/New_York'),Date.UTC(2026,6,10,13));
+ assert.equal(Zones.timestamp(2026,11,1,1,30,'America/New_York'),Date.UTC(2026,10,1,5,30));
+ assert.throws(()=>Zones.timestamp(2026,3,8,2,30,'America/New_York'),/不存在/);
+ assert.throws(()=>Zones.timestamp(2026,1,10,9,0,'Unknown/Zone'),/不支持/);
+});
+test('RDATE union deduplicates rule instances and EXDATE takes precedence',()=>{
+ const report=Ics.parse(ics([['UID:rdate','SUMMARY:补课','DTSTART:20261012T090000','DTEND:20261012T100000','RRULE:FREQ=WEEKLY;COUNT=2','RDATE:20261019T090000,20261020T140000,20261020T140000,20261021T140000','EXDATE:20261019T090000,20261021T140000']]),planNow);
+ assert.equal(report.notes.length,0);assert.equal(report.document.tasks.length,2);assert.equal(report.document.occurrences.length,1);
+ assert.equal(report.document.tasks[1].planning.startAt,new Date(2026,9,20,14).getTime());Backup.decode(JSON.stringify(report.document));
+});
+test('RDATE explicit periods preserve their duration and reject ambiguous overlap',()=>{
+ const base=['UID:period','SUMMARY:补课','DTSTART:20261012T090000','DTEND:20261012T100000'];
+ const result=Ics.parse(ics([[...base,'RDATE;VALUE=PERIOD:20261013T140000/20261013T153000']]),planNow);
+ assert.equal(result.document.tasks[1].durationMinutes,90);
+ const bad=Ics.parse(ics([[...base,'RDATE;VALUE=PERIOD:20261012T090000/20261012T110000']]),planNow);assert.equal(bad.document.tasks.length,0);assert.match(bad.notes.join(''),/时长不同/);
+});
+test('Non-recurring DTSTART can be excluded while independent RDATE occurrences survive',()=>{
+ const result=Ics.parse(ics([['UID:extras','SUMMARY:独立日期','DTSTART;VALUE=DATE:20261012','RDATE;VALUE=DATE:20261013','EXDATE;VALUE=DATE:20261012']]),planNow);
+ assert.equal(result.notes.length,0);assert.equal(result.document.tasks.length,1);assert.equal(Plan.forTask(result.document.tasks[0]).plannedDate,'2026-10-13');
+});
+test('RDATE rescheduling retains original occurrence identity',()=>{
+ const result=Ics.parse(ics([['UID:extra-edit','SUMMARY:原课','DTSTART:20261012T090000','RDATE:20261013T140000'],['UID:extra-edit','RECURRENCE-ID:20261013T140000','SUMMARY:调课','DTSTART:20261014T160000','DTEND:20261014T170000']]),planNow);
+ assert.equal(result.notes.length,0);assert.equal(result.document.tasks.length,2);assert.match(result.document.tasks[1].id,/:rdate:/);assert.equal(result.document.tasks[1].title,'调课');
+});
+test('Zoned weekly recurrence crosses DST without shifting the source wall clock',()=>{
+ const result=Ics.parse(ics([['UID:dst','SUMMARY:跨时区课程','DTSTART;TZID=America/New_York:20261025T090000','DTEND;TZID=America/New_York:20261025T100000','RRULE:FREQ=WEEKLY;COUNT=3']]),planNow);
+ assert.equal(result.document.tasks.length,3);assert.deepEqual(plain(result.document.tasks.map(t=>t.planning.startAt)),[Date.UTC(2026,9,25,13),Date.UTC(2026,10,1,14),Date.UTC(2026,10,8,14)]);
+ assert.ok(result.document.tasks.every(t=>t.repeat==='none'));assert.match(result.notes.join(''),/展开/);Backup.decode(JSON.stringify(result.document));
+});
+test('Zoned recurrence applies exclusion, moved occurrence and count to original source dates',()=>{
+ const result=Ics.parse(ics([['UID:dst-edit','SUMMARY:课程','DTSTART;TZID=America/New_York:20261025T090000','RRULE:FREQ=WEEKLY;COUNT=3','EXDATE;TZID=America/New_York:20261101T090000'],['UID:dst-edit','RECURRENCE-ID;TZID=America/New_York:20261108T090000','SUMMARY:改期','DTSTART;TZID=America/New_York:20261109T100000']]),planNow);
+ assert.equal(result.document.tasks.length,2);assert.equal(result.document.tasks[1].planning.startAt,Date.UTC(2026,10,9,15));assert.match(result.document.tasks[1].id,new RegExp(String(Date.UTC(2026,10,8,14))));
+});
+test('Unbounded zoned recurrence clearly reports a bounded import horizon',()=>{
+ const result=Ics.parse(ics([['UID:bounded','SUMMARY:跨时区','DTSTART;TZID=America/New_York:20261012T090000','RRULE:FREQ=WEEKLY']]),planNow);
+ assert.match(result.notes.join(''),/无结束规则仅展开至/);assert.ok(result.document.tasks.length>=52&&result.document.tasks.length<=53);
+});
+test('ICS snapshot can reimport long source UID and expanded occurrence identity',()=>{
+ const src=Ics.parse(ics([['UID:'+('long-'.repeat(30)),'SUMMARY:长标识','DTSTART:20261012T090000','RDATE:20261013T140000']]),planNow);
+ const restored=Ics.parse(Ics.exportMonth(src.document.tasks,[],planNow),planNow);assert.equal(restored.notes.length,0);assert.equal(restored.document.tasks.length,2);
+});
+test('Calendar source update defaults to keep; opt-in preserves creation/order and is atomic',async()=>{
+ const f=repositoryFixture();await f.repo.load(f.context);
+ const doc=Ics.parse(ics([['UID:update','SUMMARY:旧标题','DTSTART;VALUE=DATE:20261012']]),planNow).document;
+ await f.repo.importCalendar(doc,[],JSON.stringify([await f.repo.reload(),await f.repo.getOccurrences()]));
+ const old=(await f.repo.reload())[0],changed=plain(doc);changed.tasks[0].title='新标题';
+ let snapshot=JSON.stringify([await f.repo.reload(),await f.repo.getOccurrences()]);assert.equal(await f.repo.importCalendar(changed,[],snapshot),0);assert.equal((await f.repo.reload())[0].title,'旧标题');
+ assert.equal(await f.repo.importCalendar(changed,[old.id],snapshot),1);assert.equal((await f.repo.reload())[0].title,'新标题');assert.equal((await f.repo.reload())[0].createdAt,old.createdAt);
+ snapshot=JSON.stringify([await f.repo.reload(),await f.repo.getOccurrences()]);changed.tasks[0].title='失败不应保存';f.fail('INSERT OR REPLACE INTO tasks');
+ await assert.rejects(f.repo.importCalendar(changed,[old.id],snapshot));assert.equal((await f.repo.reload())[0].title,'新标题');f.db.close();
+});
+test('Calendar source update protects completed records and rejects stale preview',async()=>{
+ const f=repositoryFixture();await f.repo.load(f.context);const doc=Ics.parse(ics([['UID:protected','SUMMARY:课程','DTSTART;VALUE=DATE:20261012']]),planNow).document;
+ await f.repo.mergeBackup(doc);const stale=JSON.stringify([await f.repo.reload(),await f.repo.getOccurrences()]);await f.repo.save(S.toggle((await f.repo.reload())[0],planNow+1));
+ assert.equal(IcsUpdates.preview(doc,await f.repo.reload(),[]).eligible.length,0);
+ await assert.rejects(f.repo.importCalendar(doc,[],stale),/数据已变化/);
+ await assert.rejects(f.repo.importCalendar(doc,[doc.tasks[0].id],JSON.stringify([await f.repo.reload(),await f.repo.getOccurrences()])),/完成记录/);assert.equal((await f.repo.reload())[0].completed,true);f.db.close();
+});
+
+test('UTC recurring imports stay at UTC clock when local zone crosses DST',()=>{
+ const before=process.env.TZ;process.env.TZ='America/New_York';try {
+ const result=Ics.parse(ics([['UID:utc-dst','SUMMARY:UTC 固定课','DTSTART:20261025T130000Z','DTEND:20261025T140000Z','RRULE:FREQ=WEEKLY;COUNT=3']]),Date.UTC(2026,9,12));
+ assert.equal(result.document.tasks.length,3);assert.deepEqual(plain(result.document.tasks.map(t=>t.planning.startAt)),[Date.UTC(2026,9,25,13),Date.UTC(2026,10,1,13),Date.UTC(2026,10,8,13)]);
+ }finally{if(before===undefined)delete process.env.TZ;else process.env.TZ=before;}
+});
+test('Zoned BYDAY follows source day even if target date is the next day',()=>{
+ const result=Ics.parse(ics([['UID:source-day','SUMMARY:源时区星期日','DTSTART;TZID=America/New_York:20261025T230000','RRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=2']]),planNow);
+ assert.equal(result.document.tasks.length,2);assert.deepEqual(plain(result.document.tasks.map(t=>t.planning.startAt)),[Date.UTC(2026,9,26,3),Date.UTC(2026,10,2,4)]);
+});
+test('ICS LOCATION roundtrips separately from note without accumulating duplicate text',()=>{
+ const doc=Ics.parse(ics([['UID:place','SUMMARY:地点','DESCRIPTION:准备材料','LOCATION:图书馆','DTSTART:20261012T090000']]),planNow).document;
+ assert.equal(doc.tasks[0].planning.location,'图书馆');assert.equal(doc.tasks[0].note,'准备材料');
+ const again=Ics.parse(Ics.exportMonth(doc.tasks,[],planNow),planNow);assert.equal(again.document.tasks[0].planning.location,'图书馆');assert.equal(again.document.tasks[0].note,'准备材料');
+});
+test('RDATE-only master can be moved and cancelled without cancelling extra days',()=>{
+ const master=['UID:only','SUMMARY:初始','DTSTART:20261012T090000','RDATE:20261013T140000'];
+ const edit=['UID:only','RECURRENCE-ID:20261012T090000','SUMMARY:改期','DTSTART:20261014T090000'];
+ const result=Ics.parse(ics([master,edit]),planNow);assert.equal(result.notes.length,0);assert.equal(result.document.tasks[0].id,'ics:only');assert.equal(result.document.tasks[0].title,'改期');
+ const cancelled=Ics.parse(ics([master,['UID:only','RECURRENCE-ID:20261012T090000','STATUS:CANCELLED']]),planNow);assert.equal(cancelled.document.tasks.length,1);assert.match(cancelled.document.tasks[0].id,/:rdate:/);
+});
+test('Old preferences remain compatible; explicit motion preference roundtrips in backup',()=>{
+ const old=plain(Plan.defaults());delete old.reduceMotion;Plan.validatePreferences(old);
+ const settings={display:{...old,reduceMotion:true},theme:'system',sort:'created'};
+ const doc=Backup.decode(Backup.encode([],[],planNow,undefined,settings));assert.equal(doc.settings.display.reduceMotion,true);
+ assert.throws(()=>Plan.validatePreferences({...old,reduceMotion:'yes'}));
+});
+
+test('AI input includes readable current time and only future free windows between appointments',()=>{
+ const f=planFixture();assert.equal(f.input.nowLocal,'2026-10-12T07:00');assert.deepEqual(plain(f.input.free.filter(x=>x.date===f.input.today)),[{date:'2026-10-12',start:'08:00',end:'10:00'},{date:'2026-10-12',start:'11:00',end:'18:00'}]);
+ const late=AiPlan.input(f.tasks,[],new Date(2026,9,12,11,7).getTime(),8,18,15);assert.equal(late.free[0].start,'11:15');
+ const ended=AiPlan.input(f.tasks,[],new Date(2026,9,12,22).getTime(),8,18,15);assert.equal(ended.free.some(x=>x.date===ended.today),false);
+});
+
+test('Fixed UTC to Shanghai recurrence also preserves source BYDAY across midnight',()=>{
+ const result=Ics.parse(ics([['UID:utc-weekday','SUMMARY:UTC 周日夜间','DTSTART:20261025T230000Z','DTEND:20261026T000000Z','RRULE:FREQ=WEEKLY;BYDAY=SU;COUNT=2']]),planNow);
+ assert.equal(result.document.tasks.length,2);assert.deepEqual(plain(result.document.tasks.map(t=>t.planning.startAt)),[Date.UTC(2026,9,25,23),Date.UTC(2026,10,1,23)]);Backup.decode(JSON.stringify(result.document));
+});

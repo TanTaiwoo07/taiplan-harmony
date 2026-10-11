@@ -1,3 +1,13 @@
+# 当前检查点：1.0.0（2026-10-11）
+
+最新交接：DELIVERY-100.md；未完成与未验收项：FEATURE-AUDIT-100.md。
+本机模拟器交付，父版本0.9已独立备份，原保护目录保持只读。
+完成浮动原生材质、非线性动画、单齿轮与分类设置、关于、云端排程评价/建议/预览/采用/撤销、RDATE/IANA时区与来源保护更新。
+154项回归通过；API26构建成功；已有服务真实AI建议采用与撤销、冲突拒绝通过。日历移动15分钟并撤销通过。
+本版不宣称全部长期工作包verified：高级搜索、复杂历史迁移和完整ICS未完成；真机语音/锁屏提醒/签名、完整无障碍及连续手势矩阵未验收。最终数据与源目录完整性以包内证据为准。
+下面各版本台账保持历史，不以其旧状态替代当前记录。
+
+---
 # 当前检查点：0.9.0-preview.1（2026-10-11）
 
 以 [DELIVERY-090.md](DELIVERY-090.md) 为最新交接。0.8已独立备份，原归档不移动。
@@ -175,4 +185,3 @@ planned 是尚未执行；in_progress 是正在开发；implemented_unverified �
 - 证据：milestones/device-data-verification.json、phase1-keyboard-fixed.png、phase1-overlap.png、phase1-dark-settings.png，源/设备基线在 milestones/v0.5.0-before-phase1。
 - 未完成：例外与编辑范围、时间块拖动/缩放、重复课表 ICS、完整设置/分类管理、全量页面拆分、跨时区/DST/真机/性能验收；不推进第二阶段。
 - 需要用户决定：当前继续第一阶段无额外必需决定。
-
