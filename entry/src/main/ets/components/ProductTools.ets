@@ -1,3 +1,5 @@
+import { MaterialService } from '../services/MaterialService';
+import { IconLabel } from './IconLabel';
 import { ProductState, FocusSession, Habit, Countdown } from '../model/Product';
 import { Task } from '../model/Task';
 import { ProductService } from '../services/ProductService';
@@ -6,6 +8,7 @@ import { util } from '@kit.ArkTS';
 
 @Component
 export struct ProductTools {
+  @Prop useMaterial: boolean = true;
   @Prop initialTab: string = '';
   @Prop state: ProductState = ProductService.defaults();
   @Prop tasks: Task[] = [];
@@ -65,7 +68,7 @@ export struct ProductTools {
   }
   private pickDate(): void {
     const selected = PlanningService.date(this.selectedDate);
-    this.getUIContext().showDatePickerDialog({ start: new Date(2000, 0, 1), end: new Date(2100, 11, 31), selected: selected,
+    this.getUIContext().showDatePickerDialog({ systemMaterial: MaterialService.surface(this.useMaterial), start: new Date(2000, 0, 1), end: new Date(2100, 11, 31), selected: selected,
       onAccept: (result: DatePickerResult) => { this.selectedDate = PlanningService.key(new Date(result.year ?? selected.getFullYear(), result.month ?? selected.getMonth(), result.day ?? selected.getDate(), 12).getTime()); } });
   }
   private async saveHabit(): Promise<void> {
@@ -105,7 +108,7 @@ export struct ProductTools {
     try { await this.commit(next); } catch {}
   }
   private remove(id: string, habit: boolean): void {
-    this.getUIContext().showAlertDialog({ title: habit ? '删除习惯和打卡记录？' : '删除倒数日？', message: habit ? '请先备份需要保留的历史。' : '删除后可撤销最近一次操作。',
+    this.getUIContext().showAlertDialog({ systemMaterial: MaterialService.surface(this.useMaterial), title: habit ? '删除习惯和打卡记录？' : '删除倒数日？', message: habit ? '请先备份需要保留的历史。' : '删除后可撤销最近一次操作。',
       primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '删除', action: async () => {
         const next = ProductService.clone(this.state); const removed = next.countdowns.find((entry: Countdown) => entry.id === id);
         if (habit) { next.habits = next.habits.filter((item: Habit) => item.id !== id); }
@@ -140,17 +143,17 @@ export struct ProductTools {
       Text((this.active()?.phase === 'work' ? '专注' : '休息') + ' · ' + (this.active()?.status === 'paused' ? '已暂停' : this.remaining() === '00:00' ? '时间到，请结束本次' : '进行中'))
         .fontColor($r('app.color.text_secondary'))
       Row({ space: 8 }) {
-        Button(this.remaining() === '00:00' ? '完成本次' : this.active()?.status === 'paused' ? '继续' : '暂停').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1)
+        Button({ type: ButtonType.Capsule }) { IconLabel(this.remaining() === '00:00' ? '完成本次' : this.active()?.status === 'paused' ? '继续' : '暂停', this.remaining() === '00:00' ? $r('app.media.glyph_check') : this.active()?.status === 'paused' ? $r('app.media.glyph_play') : $r('app.media.glyph_pause')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1)
           .onClick(() => this.action(this.remaining() === '00:00' ? 'finish' : this.active()?.status === 'paused' ? 'resume' : 'pause'))
-        Button('结束并保留记录').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.action('abandon'))
+        Button({ type: ButtonType.Capsule }) { IconLabel('结束并保留记录', $r('app.media.glyph_stop'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.action('abandon'))
       }
     } else {
       Select(this.taskOptions())
         .value(this.tasks.find((task: Task) => task.id === this.related)?.title ?? '不关联任务')
         .onSelect((index: number) => { this.related = index === 0 ? '' : this.tasks.filter((task: Task) => !task.completed && task.planning?.kind !== 'event')[index - 1].id; })
       Row({ space: 8 }) {
-        Button('开始专注').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.start('work'))
-        Button(this.breakPhase() === 'long' ? '长休息' : '短休息').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.start(this.breakPhase()))
+        Button({ type: ButtonType.Capsule }) { IconLabel('开始专注', $r('app.media.glyph_play'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.start('work'))
+        Button({ type: ButtonType.Capsule }) { IconLabel(this.breakPhase() === 'long' ? '长休息' : '短休息', $r('app.media.glyph_break')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).onClick(() => this.start(this.breakPhase()))
       }
     }
     Text('累计有效专注 ' + this.minutes().toString() + ' 分钟 · 不会自动完成关联任务').fontSize(13).fontColor($r('app.color.text_secondary'))
@@ -161,8 +164,8 @@ export struct ProductTools {
         (session.status === 'finished' ? '完成' : session.status === 'abandoned' ? '提前结束' : session.status === 'paused' ? '暂停' : '进行中'))
         .fontSize(13).fontColor($r('app.color.text_secondary')).layoutWeight(1).padding(10)
       if (session.status === 'finished' || session.status === 'abandoned') {
-        Button('删除记录').height(48).fontSize(12).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_secondary')).onClick(() => {
-          this.getUIContext().showAlertDialog({ title: '删除这条专注记录？', message: session.title + '，删除后不能撤销。',
+        Button({ type: ButtonType.Capsule }) { IconLabel('删除记录', $r('app.media.glyph_trash'), $r('app.color.text_primary')) }.height(48).fontSize(12).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_secondary')).onClick(() => {
+          this.getUIContext().showAlertDialog({ systemMaterial: MaterialService.surface(this.useMaterial), title: '删除这条专注记录？', message: session.title + '，删除后不能撤销。',
             primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '删除', action: () => this.removeSession(session.id) } });
         })
       }
@@ -172,7 +175,7 @@ export struct ProductTools {
   @Builder
   habitPage() {
     Text('打卡日期 · ' + this.selectedDate).fontSize(15).fontColor($r('app.color.text_primary'))
-    Button('选择日期 / 补打').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.pickDate())
+    Button({ type: ButtonType.Capsule }) { IconLabel('选择日期 / 补打', $r('app.media.glyph_plan_date'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.pickDate())
     ForEach(this.state.habits, (habit: Habit) => {
       Column({ space: 8 }) {
         Text(habit.title).fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary')).width('100%')
@@ -184,8 +187,8 @@ export struct ProductTools {
           Button('打卡 ' + ProductService.count(habit, this.selectedDate).toString() + '/' + habit.dailyTarget.toString()).height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary'))
             .enabled(ProductService.scheduled(habit, this.selectedDate) && ProductService.count(habit, this.selectedDate) < habit.dailyTarget && this.selectedDate <= PlanningService.key(this.now))
             .onClick(() => this.check(habit, true))
-          Button('撤销一次').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).enabled(ProductService.count(habit, this.selectedDate) > 0).onClick(() => this.check(habit, false))
-          Button('删除').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.remove(habit.id, true))
+          Button({ type: ButtonType.Capsule }) { IconLabel('撤销一次', $r('app.media.glyph_undo'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).enabled(ProductService.count(habit, this.selectedDate) > 0).onClick(() => this.check(habit, false))
+          Button({ type: ButtonType.Capsule }) { IconLabel('删除', $r('app.media.glyph_trash'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.remove(habit.id, true))
         }
         Text('近期记录：' + habit.checks.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7).map((check) => check.date + ' ×' + check.count.toString()).join(' · '))
           .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
@@ -204,7 +207,7 @@ export struct ProductTools {
       }
     }
     Button('每天目标 ' + this.dailyTarget.toString() + ' 次').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.dailyTarget = this.dailyTarget % 10 + 1; })
-    Button('创建习惯').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).enabled(this.title.trim().length > 0).onClick(() => this.saveHabit())
+    Button({ type: ButtonType.Capsule }) { IconLabel('创建习惯', $r('app.media.glyph_habit'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).enabled(this.title.trim().length > 0).onClick(() => this.saveHabit())
     Text('规则创建后固定，避免改写历史统计；需要变更时可新建习惯。打卡日期可选过去日期，不能选未来。').fontSize(12).fontColor($r('app.color.text_secondary'))
   }
   @Builder
@@ -217,9 +220,9 @@ export struct ProductTools {
         Text(ProductService.nextDate(item, PlanningService.key(this.now)) + (item.annual ? ' · 每年' : '') + (item.category ? ' · ' + item.category : ''))
           .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
         Row({ space: 8 }) {
-          Button('编辑').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.editing = item.id; this.title = item.title; this.selectedDate = item.date; this.annual = item.annual; this.category = item.category; })
-          Button(item.pinned ? '取消置顶' : '置顶').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.pin(item))
-          Button('删除').height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.remove(item.id, false))
+          Button({ type: ButtonType.Capsule }) { IconLabel('编辑', $r('app.media.glyph_edit'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.editing = item.id; this.title = item.title; this.selectedDate = item.date; this.annual = item.annual; this.category = item.category; })
+          Button({ type: ButtonType.Capsule }) { IconLabel(item.pinned ? '取消置顶' : '置顶', $r('app.media.glyph_pin')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.pin(item))
+          Button({ type: ButtonType.Capsule }) { IconLabel('删除', $r('app.media.glyph_trash'), $r('app.color.text_primary')) }.height(48).fontSize(14).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => this.remove(item.id, false))
         }
       }.padding(16).borderRadius(16).backgroundColor($r('app.color.card_background')).width('100%')
     }, (item: Countdown) => JSON.stringify(item))

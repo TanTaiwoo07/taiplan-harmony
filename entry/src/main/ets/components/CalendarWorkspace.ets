@@ -40,13 +40,13 @@ export struct CalendarWorkspace {
       }.width('100%')
       if (this.view !== 'month') {
         Row() {
-          Button('‹').width(48).height(48).fontSize(26).padding(0).backgroundColor(Color.Transparent)
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.glyph_back')).width(22).height(22).accessibilityLevel('no') }.width(48).height(48).fontSize(26).padding(0).backgroundColor(Color.Transparent)
             .fontColor($r('app.color.text_primary')).accessibilityText('上一' + this.view).onClick(() => this.shift(-1))
           Text(this.view === 'year' ? this.selected.slice(0, 4) + '年' : this.selected).layoutWeight(1).textAlign(TextAlign.Center)
             .fontSize(17).fontWeight(FontWeight.Medium).fontColor($r('app.color.text_primary'))
           Button('今天').height(48).fontSize(12).backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary'))
             .onClick(() => this.onSelect(ScheduleService.key(this.now)))
-          Button('›').width(48).height(48).fontSize(26).padding(0).backgroundColor(Color.Transparent)
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.glyph_next')).width(22).height(22).accessibilityLevel('no') }.width(48).height(48).fontSize(26).padding(0).backgroundColor(Color.Transparent)
             .fontColor($r('app.color.text_primary')).accessibilityText('下一' + this.view).onClick(() => this.shift(1))
         }.width('100%')
       }

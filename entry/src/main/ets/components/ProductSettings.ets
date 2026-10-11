@@ -1,3 +1,4 @@
+import { IconLabel } from './IconLabel';
 import { ProductState } from '../model/Product';
 import { ProductService } from '../services/ProductService';
 @Component
@@ -52,7 +53,7 @@ export struct ProductSettings {
         }
       }
       if (this.state.features.focus || this.state.features.habits || this.state.features.countdowns) {
-        Button('打开我的工具  ›').height(52).width('100%').onClick(() => this.onOpen())
+        Button({ type: ButtonType.Capsule }) { IconLabel('打开我的工具', $r('app.media.glyph_workbench_on_accent'), $r('app.color.on_accent')) }.height(52).width('100%').onClick(() => this.onOpen())
       }
       if (this.error) { Text(this.error).fontSize(13).fontColor($r('app.color.danger')) }
     }.padding(16).width('100%').borderRadius(18).backgroundColor($r('app.color.card_background')).enabled(!this.busy)

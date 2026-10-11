@@ -1,3 +1,4 @@
+import { MaterialService } from '../services/MaterialService';
 import { Task, TaskItem } from '../model/Task';
 import { UrgencyService } from '../services/UrgencyService';
 import { PlanningService } from '../services/PlanningService';
@@ -6,6 +7,7 @@ import { ScheduleService } from '../services/ScheduleService';
 
 @Component
 export struct TaskCard {
+  @Prop useMaterial: boolean = true;
   @Prop task: Task = { id: '', title: '', note: '', completed: false, createdAt: 0,
     updatedAt: 0, priority: 1, tags: [], dueAt: 0, repeat: 'none', sortOrder: 0 };
   @Prop completed: boolean = false;
@@ -34,12 +36,14 @@ export struct TaskCard {
         .selectedColor($r('app.color.accent'))
         .accessibilityText((this.completed ? '取消完成：' : '标记完成：') + this.task.title)
         .onChange((selected: boolean) => { if (selected !== this.completed) { this.onToggle(this.task); } })
-      } else { Text('▦').width(22).fontSize(22).fontColor($r('app.color.text_secondary')).margin({ top: 12 }) }
+      } else { Image($r('app.media.glyph_calendar')).width(22).height(22).accessibilityText('日历事件').margin({ top: 12 }) }
       Column({ space: 7 }) {
         if (UrgencyService.label(this.task, this.displayDueAt, this.completed, this.now)) {
-          Text(UrgencyService.label(this.task, this.displayDueAt, this.completed, this.now))
-            .fontSize(14).fontWeight(FontWeight.Bold).fontColor($r('app.color.danger'))
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 }).borderRadius(8)
+          Row({ space: 6 }) {
+            Image($r('app.media.glyph_warning_danger')).width(16).height(16).accessibilityLevel('no')
+            Text(UrgencyService.label(this.task, this.displayDueAt, this.completed, this.now).replace('！', '').trim())
+              .fontSize(14).fontWeight(FontWeight.Bold).fontColor($r('app.color.danger'))
+          }.padding({ left: 10, right: 10, top: 6, bottom: 6 }).borderRadius(8)
             .backgroundColor($r('app.color.chip_background'))
         }
         Row({ space: 4 }) {
@@ -48,14 +52,14 @@ export struct TaskCard {
             .fontColor(this.completed ? $r('app.color.text_secondary') : $r('app.color.text_primary'))
             .decoration({ type: this.completed ? TextDecorationType.LineThrough : TextDecorationType.None })
             .accessibilityText('查看或编辑：' + this.task.title).onClick(() => this.onEdit(this.task))
-          Button('⋯', { type: ButtonType.Normal }).width(48).height(48).padding(0).fontSize(22)
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.glyph_more')).width(22).height(22).accessibilityLevel('no') }.width(48).height(48).padding(0).fontSize(22)
             .backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary'))
             .accessibilityText('任务操作：' + this.task.title)
             .bindMenu([
-              { value: '编辑', action: () => this.onEdit(this.task) },
-              { value: '复制为新任务', action: () => this.onCopy() },
-              { value: this.task.repeat === 'none' ? '删除' : '跳过或删除', action: () => this.onRemove(this.task) }
-            ])
+              { value: '编辑', icon: $r('app.media.glyph_edit'), action: () => this.onEdit(this.task) },
+              { value: '复制为新任务', icon: $r('app.media.glyph_copy'), action: () => this.onCopy() },
+              { value: this.task.repeat === 'none' ? '删除' : '跳过或删除', icon: $r('app.media.glyph_trash'), action: () => this.onRemove(this.task) }
+            ], { systemMaterial: MaterialService.surface(this.useMaterial) })
         }.width('100%')
         Row({ space: 8 }) {
           if (this.task.priority === 0) {

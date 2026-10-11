@@ -1,4 +1,6 @@
-# TaiPlan Harmony 1.0.0
+# TaiPlan Harmony 1.0.1
+
+1.0.1 更新：接入用户提供的整套 SVG 图标，适配浅深色与按钮对比度；底栏改用 API26 官方浮动页签沉浸光感，收集面板和系统弹窗使用原生材质。内容卡片保留实色，不支持的设备回退上一版。详细记录见 [图标与材质验收](docs/ICONS-101.md)。1.0 的报告及演示保留为历史版本，本次另行归档。
 
 鸿蒙原生待办与日历，ArkTS + ArkUI + HarmonyOS API26 + SQLite。作者 TaiWoo_Chen。
 这是本机模拟器交付版；支持范围和未验收能力见[交付记录](docs/DELIVERY-100.md)、[功能核查](docs/FEATURE-AUDIT-100.md)、[演示答辩](docs/DEMO-AND-DEFENSE.md)。

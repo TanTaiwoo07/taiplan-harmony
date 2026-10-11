@@ -185,3 +185,8 @@ planned 是尚未执行；in_progress 是正在开发；implemented_unverified �
 - 证据：milestones/device-data-verification.json、phase1-keyboard-fixed.png、phase1-overlap.png、phase1-dark-settings.png，源/设备基线在 milestones/v0.5.0-before-phase1。
 - 未完成：例外与编辑范围、时间块拖动/缩放、重复课表 ICS、完整设置/分类管理、全量页面拆分、跨时区/DST/真机/性能验收；不推进第二阶段。
 - 需要用户决定：当前继续第一阶段无额外必需决定。
+
+
+## 2026-10-11：1.0.1 图标与材质
+
+接入用户 74 个 SVG，保留原稿/哈希并生成浅深色、选中态及反色资源。修复 SVG 颜色、空心填实、按钮圆角；统一导航/工具/设置/编辑操作。底栏改放 API26 原生浮动页签，收集面板和弹窗用系统材质，正文实色；关闭/不支持回退上一版。154 项测试与原生构建安装通过，模拟器精致档已确认。详细边界与证据见 ICONS-101.md。旧 1.0.0 交付包独立保留。

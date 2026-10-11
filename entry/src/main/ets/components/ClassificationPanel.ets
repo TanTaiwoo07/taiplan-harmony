@@ -1,6 +1,8 @@
+import { MaterialService } from '../services/MaterialService';
 import { Task } from '../model/Task';
 @Component
 export struct ClassificationPanel {
+  @Prop useMaterial: boolean = true;
   @Prop tasks: Task[] = [];
   onRename: (kind: string, from: string, to: string) => Promise<void> = async () => {};
   @State private kind: string = 'list';
@@ -17,7 +19,7 @@ export struct ClassificationPanel {
     return Array.from(new Set<string>(names.filter((name: string) => name.length > 0))).sort();
   }
   private confirm(remove: boolean): void {
-    this.getUIContext().showAlertDialog({ title: remove ? '移除分类？' : '重命名或合并分类？',
+    this.getUIContext().showAlertDialog({ systemMaterial: MaterialService.surface(this.useMaterial), title: remove ? '移除分类？' : '重命名或合并分类？',
       message: '影响全部关联任务及单次例外，任务本身和完成记录保留。目标名称已存在时会合并归类。',
       primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '确认', action: async () => {
         if (this.busy) { return; } this.busy = true;

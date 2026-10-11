@@ -56,7 +56,8 @@ export struct PreferencePanel {
       Row() { Text('减少动态效果').layoutWeight(1).fontSize(14).fontColor($r('app.color.text_primary'))
         Toggle({ type: ToggleType.Switch, isOn: this.settings.reduceMotion ?? false }).selectedColor($r('app.color.accent')).onChange((value: boolean) => this.change('motion', value))
       }.constraintSize({ minHeight: 48 })
-      Text(MaterialService.supported() ? '底栏与收集面板使用原生光感材质；动效尊重系统减少动画设置。' : '当前设备使用毛玻璃回退；关闭材质可使用实色表面。动效尊重系统减少动画设置。')
+      Text(MaterialService.description()).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
+      Text(MaterialService.supported() ? '底栏使用系统浮动页签与原生光感，收集面板使用系统材质；普通内容卡片保留实色。动效尊重系统减少动画设置。' : '当前设备使用毛玻璃回退；关闭材质可使用实色表面。动效尊重系统减少动画设置。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       }
     }.width('100%').padding(16).borderRadius(18).backgroundColor($r('app.color.card_background'))

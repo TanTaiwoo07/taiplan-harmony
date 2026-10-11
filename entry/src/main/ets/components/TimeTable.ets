@@ -108,8 +108,8 @@ export struct TimeTable {
     Column({ space: 8 }) {
       Row({ space: 8 }) {
         Text('双指缩放 · 长按移动 · 点按详情').fontSize(12).fontColor($r('app.color.text_secondary')).layoutWeight(1)
-        Button('−').width(40).height(44).fontSize(22).padding(0).accessibilityText('缩小时间刻度').backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).onClick(() => this.zoom(this.hourHeight / 1.5))
-        Button('+').width(40).height(44).fontSize(22).padding(0).accessibilityText('放大时间刻度').backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).onClick(() => this.zoom(this.hourHeight * 1.5))
+        Button({ type: ButtonType.Normal }) { Image($r('app.media.glyph_zoom_out')).width(22).height(22).accessibilityLevel('no') }.width(40).height(44).fontSize(22).padding(0).accessibilityText('缩小时间刻度').backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).onClick(() => this.zoom(this.hourHeight / 1.5))
+        Button({ type: ButtonType.Normal }) { Image($r('app.media.glyph_zoom_in')).width(22).height(22).accessibilityLevel('no') }.width(40).height(44).fontSize(22).padding(0).accessibilityText('放大时间刻度').backgroundColor(Color.Transparent).fontColor($r('app.color.text_primary')).onClick(() => this.zoom(this.hourHeight * 1.5))
       }.width('100%')
       Text(this.dragLabel ? this.dragLabel + ' · 松手后确认' : '长按移动，拖底部改时长；松手后再保存。').height(36).maxLines(2).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       Stack({ alignContent: Alignment.TopStart }) {

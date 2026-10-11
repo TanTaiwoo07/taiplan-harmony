@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tpAppBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0FA98D"/>
+      <stop offset="0.55" stop-color="#0B8C7A"/>
+      <stop offset="1" stop-color="#086B5E"/>
+    </linearGradient>
+    <radialGradient id="tpAppGlow" cx="0.28" cy="0.2" r="0.85">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#tpAppBg)"/>
+  <rect width="1024" height="1024" fill="url(#tpAppGlow)"/>
+  <g fill="none" stroke="#FDF6EC" stroke-width="58" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M286 348H746"/>
+    <path d="M516 348V606"/>
+    <path d="M516 606C516 758 578 800 700 772"/>
+  </g>
+</svg>

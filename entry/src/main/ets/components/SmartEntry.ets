@@ -1,3 +1,5 @@
+import { MaterialService } from '../services/MaterialService';
+import { IconLabel } from './IconLabel';
 import { common } from '@kit.AbilityKit';
 import { AiConfigStore } from '../data/AiConfigStore';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -11,6 +13,7 @@ import { SpeechService } from '../platform/SpeechService';
 
 @Component
 export struct SmartEntry {
+  @Prop useMaterial: boolean = true;
   @Prop initialText: string = '';
   @Prop configOnly: boolean = false;
   onOpenConfig: () => void = () => {};
@@ -68,7 +71,7 @@ export struct SmartEntry {
     finally { this.configSaving = false; }
   }
   private async removeKey(): Promise<void> {
-    this.getUIContext().showAlertDialog({ title: '移除 AI 密钥？', message: '服务地址和模型保留，之后需要重新填写密钥。',
+    this.getUIContext().showAlertDialog({ systemMaterial: MaterialService.surface(this.useMaterial), title: '移除 AI 密钥？', message: '服务地址和模型保留，之后需要重新填写密钥。',
       primaryButton: { value: '取消', action: () => {} }, secondaryButton: { value: '移除', action: async () => {
         try { await AiSecretStore.clear(); this.secret = ''; this.keyStatus = await AiSecretStore.status(); this.status = '密钥已移除'; }
         catch (error) { this.status = AiConfigService.failure('secret', (error as BusinessError).code); }
@@ -106,16 +109,16 @@ export struct SmartEntry {
         .fontColor($r('app.color.text_primary')).backgroundColor($r('app.color.card_background'))
         .onChange((value: string) => { if (value !== this.text) { this.cancel(); this.text = value; this.onTextChange(value); this.rows = []; } })
       Row({ space: 8 }) {
-        Button('语音输入').height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => SpeechService.shared.start(this.context(),
+        Button({ type: ButtonType.Capsule }) { IconLabel('语音输入', $r('app.media.glyph_mic'), $r('app.color.text_primary')) }.height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => SpeechService.shared.start(this.context(),
           (value: string) => { this.cancel(); this.text = value; this.onTextChange(value); this.rows = []; }, (value: string) => { this.status = value; }))
-        Button('结束录音').height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => SpeechService.shared.finish())
-        Button('取消录音').height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => { SpeechService.shared.cancel(); this.status = '录音已取消'; })
+        Button({ type: ButtonType.Capsule }) { IconLabel('结束录音', $r('app.media.glyph_stop'), $r('app.color.text_primary')) }.height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => SpeechService.shared.finish())
+        Button({ type: ButtonType.Capsule }) { IconLabel('取消录音', $r('app.media.glyph_close'), $r('app.color.text_primary')) }.height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).layoutWeight(1).onClick(() => { SpeechService.shared.cancel(); this.status = '录音已取消'; })
       }
       Row({ space: 8 }) {
-        Button('离线识别').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).enabled(!this.working).onClick(() => this.parse(false))
-        Button('发送给 AI 识别').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).enabled(!this.working).onClick(() => this.parse(true))
+        Button({ type: ButtonType.Capsule }) { IconLabel('离线识别', $r('app.media.glyph_smart_input'), $r('app.color.text_primary')) }.height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).enabled(!this.working).onClick(() => this.parse(false))
+        Button({ type: ButtonType.Capsule }) { IconLabel('发送给 AI 识别', $r('app.media.glyph_ai_service'), $r('app.color.text_primary')) }.height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).layoutWeight(1).enabled(!this.working).onClick(() => this.parse(true))
       }
-      if (this.working) { Button('取消识别').height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.cancel(); this.status = '已取消，无任务写入'; }) }
+      if (this.working) { Button({ type: ButtonType.Capsule }) { IconLabel('取消识别', $r('app.media.glyph_close'), $r('app.color.text_primary')) }.height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).onClick(() => { this.cancel(); this.status = '已取消，无任务写入'; }) }
       Text('云端识别仅发送上面的文字、当前日期和时区，不上传已有任务。使用你配置的兼容 Chat Completions 服务。')
         .fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
       if (this.status) { Text(this.status).fontSize(13).fontColor($r('app.color.text_secondary')).width('100%') }
@@ -128,14 +131,14 @@ export struct SmartEntry {
           Text(TaskService.dateLabel(row.draft.dueAt) + ' · ' + TaskService.timeLabel(TaskService.create(row.draft, 'preview', 0)) + ' · ' + TaskService.priorityLabel(row.draft.priority) + '优先级').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
           Text((row.draft.planning?.location || '地点未设置') + (row.draft.note ? '\n' + row.draft.note : '')).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
           Text(row.explanation).fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
-          Button('编辑这一条').height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).onClick(() => this.onEdit(row.draft))
+          Button({ type: ButtonType.Capsule }) { IconLabel('编辑这一条', $r('app.media.glyph_edit'), $r('app.color.text_primary')) }.height(44).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).fontSize(13).onClick(() => this.onEdit(row.draft))
         }.padding(14).borderRadius(16).backgroundColor($r('app.color.card_background')).width('100%')
       }, (row: DraftProposal) => JSON.stringify(row))
       if (this.rows.length > 0) {
-        Button('确认保存选中草稿').height(50).backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).width('100%').enabled(!this.saving && this.rows.some((row: DraftProposal) => row.selected))
+        Button({ type: ButtonType.Capsule }) { IconLabel('确认保存选中草稿', $r('app.media.glyph_check_on_accent'), $r('app.color.on_accent')) }.height(50).backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).width('100%').enabled(!this.saving && this.rows.some((row: DraftProposal) => row.selected))
           .onClick(() => this.onSave(this.rows.filter((row: DraftProposal) => row.selected).map((row: DraftProposal) => row.draft)))
       }
-      Button('AI 服务设置  ›').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).width('100%').onClick(() => this.onOpenConfig())
+      Button({ type: ButtonType.Capsule }) { IconLabel('AI 服务设置', $r('app.media.glyph_ai_service')) }.height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).width('100%').onClick(() => this.onOpenConfig())
       } else {
         Text('AI 服务').fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.text_primary')).width('100%')
         Text('填写服务根地址或完整接口地址，保存时自动补齐 /chat/completions。').fontSize(13).fontColor($r('app.color.text_secondary')).width('100%')
@@ -146,19 +149,19 @@ export struct SmartEntry {
         Text('模型').fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
         TextInput({ text: this.model, placeholder: 'deepseek-flash' }).height(48).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onChange((v: string) => { this.configRevision++; this.cancel(); this.model = v; })
         Text('API Key · ' + this.keyStatus).fontSize(14).fontColor($r('app.color.text_secondary')).width('100%')
-        TextInput({ text: this.secret, placeholder: '留空沿用现有密钥' }).type(InputType.Password).height(48).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onChange((v: string) => { this.cancel(); this.secret = v; })
+        TextInput({ text: this.secret, placeholder: '留空沿用现有密钥' }).type(InputType.Password).passwordIcon({ onIconSrc: $r('app.media.glyph_key_visible'), offIconSrc: $r('app.media.glyph_key_hidden') }).height(48).backgroundColor($r('app.color.card_background')).fontColor($r('app.color.text_primary')).onChange((v: string) => { this.cancel(); this.secret = v; })
         Row({ space: 8 }) {
           Button('安全保存').height(48).layoutWeight(1).fontSize(14).backgroundColor(this.persistKey ? $r('app.color.accent') : $r('app.color.chip_background')).fontColor(this.persistKey ? $r('app.color.on_accent') : $r('app.color.text_primary')).onClick(() => { this.persistKey = true; })
           Button('仅本次运行').height(48).layoutWeight(1).fontSize(14).backgroundColor(!this.persistKey ? $r('app.color.accent') : $r('app.color.chip_background')).fontColor(!this.persistKey ? $r('app.color.on_accent') : $r('app.color.text_primary')).onClick(() => { this.persistKey = false; })
         }
         Text(this.persistKey ? '密钥进入系统安全存储，重启后保留，不随备份导出。' : '密钥只留在应用内存，进程结束后清除；不会覆盖之前安全保存的密钥。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
         Button(this.configSaving ? '正在保存…' : '保存服务配置与密钥').height(50).backgroundColor($r('app.color.accent')).fontColor($r('app.color.on_accent')).width('100%').enabled(!this.configSaving && !this.working).onClick(() => this.saveConfig())
-        Button('测试连接与草稿响应').height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).width('100%').enabled(!this.working && !this.configSaving).onClick(() => this.testConnection())
+        Button({ type: ButtonType.Capsule }) { IconLabel('测试连接与草稿响应', $r('app.media.glyph_connection_test'), $r('app.color.text_primary')) }.height(48).backgroundColor($r('app.color.chip_background')).fontColor($r('app.color.text_primary')).width('100%').enabled(!this.working && !this.configSaving).onClick(() => this.testConnection())
         Text('测试只发送固定的买牛奶句子，不创建任务。未保存的新密钥也可用于测试。').fontSize(12).fontColor($r('app.color.text_secondary')).width('100%')
-        if (this.working) { Button('取消测试').height(48).onClick(() => this.cancel()) }
+        if (this.working) { Button({ type: ButtonType.Capsule }) { IconLabel('取消测试', $r('app.media.glyph_close'), $r('app.color.text_primary')) }.height(48).onClick(() => this.cancel()) }
         if (this.status) { Text(this.status).fontSize(14).fontColor($r('app.color.text_primary')).width('100%') }
-        Button('诊断安全存储').height(48).backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).width('100%').enabled(!this.configSaving && !this.working).onClick(() => this.diagnose())
-        Button('移除已保存密钥').height(48).backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).width('100%').enabled(!this.configSaving && !this.working).onClick(() => this.removeKey())
+        Button({ type: ButtonType.Capsule }) { IconLabel('诊断安全存储', $r('app.media.glyph_key'), $r('app.color.text_primary')) }.height(48).backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).width('100%').enabled(!this.configSaving && !this.working).onClick(() => this.diagnose())
+        Button({ type: ButtonType.Capsule }) { IconLabel('移除已保存密钥', $r('app.media.glyph_trash'), $r('app.color.text_primary')) }.height(48).backgroundColor(Color.Transparent).fontColor($r('app.color.text_secondary')).width('100%').enabled(!this.configSaving && !this.working).onClick(() => this.removeKey())
       }
     }.width('100%')
   }
