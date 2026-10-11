@@ -1134,3 +1134,85 @@ test('Backup AI non-sensitive configuration strips unrelated fields and rejects 
   settings.ai.endpoint='https://example.com/v1/chat/completions?key=secret';
   assert.throws(()=>Backup.encode([],[],Date.now(),Product.defaults(),settings));
 });
+
+const { AiConfigService: AiConfig } = loadModule('services/AiConfigService.ets');
+const { EditorOptionsService: EditorOptions } = loadModule('services/EditorOptionsService.ets');
+const { CalendarInteractionService: GridInteraction } = loadModule('services/CalendarInteractionService.ets');
+test('AI accepts the reported DeepSeek root URL and normalizes base/full paths exactly once', () => {
+  for (const value of ['https://api.deepseek.com', ' https://api.deepseek.com/ ', 'https://api.deepseek.com/chat/completions/']) {
+    assert.equal(AiConfig.endpoint(value), 'https://api.deepseek.com/chat/completions');
+  }
+  assert.equal(AiConfig.endpoint('https://example.com/v1'), 'https://example.com/v1/chat/completions');
+  assert.equal(AiConfig.endpoint('https://example.com/v1/chat/completions'), 'https://example.com/v1/chat/completions');
+});
+test('AI rejects credential URLs, queries, non-HTTPS and embedded control characters', () => {
+  for (const value of ['http://example.com', 'https://user:pass@example.com', 'https://example.com?key=secret', 'https://example.com/#secret', 'https://example.com/a\nb']) { assert.throws(() => AiConfig.endpoint(value)); }
+  assert.equal(AiConfig.validateSecret('  mock-key  '), 'mock-key');
+  for (const value of ['', 'mock\nkey', 'mock key', 'mock\rkey']) { assert.throws(() => AiConfig.validateSecret(value)); }
+});
+test('AI distinguishes validation, authentication, quota, endpoint and storage errors without credentials', () => {
+  assert.match(AiConfig.failure('network', 0, 401), /鉴权/);
+  assert.match(AiConfig.failure('network', 0, 404), /接口不存在/);
+  assert.match(AiConfig.failure('network', 0, 429), /配额/);
+  assert.match(AiConfig.failure('secret', 24000001), /不可用/);
+  assert.match(AiConfig.failure('secret', 24000005), /解锁/);
+});
+function secretFixture() {
+  const entries = new Map(); let nonce=0;
+  const asset={Tag:{ALIAS:1,SECRET:2,ACCESSIBILITY:3,CONFLICT_RESOLUTION:4,RETURN_TYPE:5},Accessibility:{DEVICE_FIRST_UNLOCKED:1},ConflictResolution:{OVERWRITE:1},ReturnType:{ALL:1},
+    add:async attrs=>{entries.set(Buffer.from(attrs.get(1)).toString(),new Map(attrs));},
+    query:async query=>{const row=entries.get(Buffer.from(query.get(1)).toString());if(!row)throw Object.assign(new Error('not found'),{code:24000002});return [new Map(row)];},
+    remove:async query=>{const alias=Buffer.from(query.get(1)).toString();if(!entries.delete(alias))throw Object.assign(new Error('not found'),{code:24000002});}};
+  const util={TextEncoder:class {encodeInto(value){return new TextEncoder().encode(value);}},TextDecoder:{create:()=>({decodeToString:bytes=>new TextDecoder().decode(bytes)})},generateRandomUUID:()=>String(++nonce)};
+  const {AiSecretStore:Secrets}=loadModule('platform/AiSecretStore.ets',{'@kit.AssetStoreKit':{asset},'@kit.ArkTS':{util}});
+  return {Secrets,entries,asset};
+}
+test('Security diagnostic uses an independent alias and leaves the user key unchanged', async () => {
+  const f=secretFixture();await f.Secrets.save('mock-user-key');await f.Secrets.probe();
+  assert.equal(await f.Secrets.read(),'mock-user-key');assert.equal(f.entries.size,1);
+});
+test('Session key is explicitly transient and does not overwrite the persistent key', async () => {
+  const f=secretFixture();await f.Secrets.save('mock-persistent');f.Secrets.useSession('mock-session');
+  assert.equal(await f.Secrets.read(),'mock-session');assert.match(await f.Secrets.status(),/仅本次/);
+  assert.equal(Buffer.from(f.entries.get('taiplan_ai_v1').get(2)).toString(),'mock-persistent');
+  await f.Secrets.clear();assert.equal(await f.Secrets.read(),'');await f.Secrets.clear();
+});
+test('Custom reminder validates combined days/hours/minutes, including the seven-day boundary', () => {
+  assert.equal(EditorOptions.lead('1','2','15'),1575);
+  assert.match(EditorOptions.leadLabel(1575), /1 天 2 小时 15 分钟/);
+  assert.equal(EditorOptions.lead('7','0','0'),10080);
+  assert.equal(EditorOptions.leadLabel(0),'准时提醒');
+  for(const args of [['7','0','1'],['0','24','0'],['0','0','60'],['','0','0'],['-1','0','0']])assert.throws(()=>EditorOptions.lead(...args));
+});
+test('Readable recurrence summary retains custom weekdays, interval and ending conditions', () => {
+  const task=modern('summary','2026-10-12',600,30,'task',{repeat:'weekly'});task.planning.rule={interval:2,weekdays:[3,1],untilDate:'2026-11-30',count:0};
+  assert.equal(EditorOptions.repeat(task),'每 2 周 · 周一、周三，至 2026-11-30');assert.deepEqual(task.planning.rule.weekdays,[3,1]);
+});
+test('Zoomed dragging converts pixels to minutes at each scale and supports negative snapping', () => {
+  for(const height of [30,60,120]){
+    assert.equal(GridInteraction.minutes(height/2,height,15),30);
+    assert.equal(GridInteraction.minutes(-height/2,height,15),-30);
+  }
+  assert.throws(()=>GridInteraction.minutes(60,0,15));assert.throws(()=>GridInteraction.minutes(60,60,7));
+});
+test('Calendar zoom keeps the focused time anchored and clamps at day edges', () => {
+  const next=GridInteraction.anchor(420,100,60,120,440);
+  assert.equal((next+100)/120,(420+100)/60);
+  assert.equal(GridInteraction.anchor(0,0,120,30,440),0);
+  assert.equal(GridInteraction.height(500),120);assert.equal(GridInteraction.height(10),30);
+});
+test('Calendar preview handles crossing midnight and clamps resize duration consistently', () => {
+  const task=modern('drag-preview','2026-10-12',23*60+30,60);
+  const item={key:'x',task,dateKey:'2026-10-12',dueAt:task.dueAt,completed:false};
+  assert.equal(GridInteraction.preview(item,0,60,false),'2026-10-13 · 00:30–01:30');
+  assert.equal(GridInteraction.preview(item,0,-1000,true),'2026-10-12 · 23:30–23:35');
+});
+
+test('AI normalized endpoint length is bounded after appending the route', () => {
+  assert.throws(() => AiConfig.endpoint('https://example.com/' + 'a'.repeat(2020)), /过长/);
+});
+test('Asset read error preserves classification while suppressing raw native details', async () => {
+  const f=secretFixture();f.asset.query=async()=>{throw Object.assign(new Error('native private diagnostic'),{code:24000001});};
+  await assert.rejects(f.Secrets.read(),e=>e.code===24000001 && /不可用/.test(e.message) && !e.message.includes('private'));
+  assert.match(await f.Secrets.status(),/不可用/);
+});

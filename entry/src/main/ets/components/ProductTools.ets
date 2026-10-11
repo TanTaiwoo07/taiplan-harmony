@@ -6,6 +6,7 @@ import { util } from '@kit.ArkTS';
 
 @Component
 export struct ProductTools {
+  @Prop initialTab: string = '';
   @Prop state: ProductState = ProductService.defaults();
   @Prop tasks: Task[] = [];
   @Prop reminderStatus: string = '';
@@ -27,7 +28,7 @@ export struct ProductTools {
   private timer: number = -1;
 
   aboutToAppear(): void {
-    this.tab = this.state.features.focus ? 'focus' : this.state.features.habits ? 'habits' : 'countdowns';
+    this.tab = this.initialTab === 'focus' && this.state.features.focus ? 'focus' : this.initialTab === 'habits' && this.state.features.habits ? 'habits' : this.initialTab === 'countdowns' && this.state.features.countdowns ? 'countdowns' : this.state.features.focus ? 'focus' : this.state.features.habits ? 'habits' : 'countdowns';
     this.timer = setInterval(() => { this.now = Date.now(); }, 1000);
   }
   aboutToDisappear(): void { if (this.timer !== -1) { clearInterval(this.timer); } }

@@ -1,6 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { DraftProposal, DraftService } from '../services/DraftService';
 import { ScheduleService } from '../services/ScheduleService';
+import { AiConfigService } from '../services/AiConfigService';
 interface Message { role: string; content: string; }
 interface CompletionRequest { model: string; messages: Message[]; temperature: number; stream: boolean; }
 interface Choice { message: Message; }
@@ -9,7 +10,9 @@ export class AiClient {
   private request: http.HttpRequest | undefined = undefined;
   cancel(): void { this.request?.destroy(); this.request = undefined; }
   async parse(endpoint: string, model: string, key: string, input: string, now: number): Promise<DraftProposal[]> {
-    if (!/^https:\/\/[^\s@?#]+\/[^\s?#]*$/.test(endpoint) || !model.trim() || !key.trim() || key.includes('\n') || input.length > 4000 || !input.trim()) {
+    endpoint = AiConfigService.endpoint(endpoint);
+    key = AiConfigService.validateSecret(key);
+    if (!model.trim() || input.length > 4000 || !input.trim()) {
       throw new Error('填写 HTTPS 完整 chat/completions 地址、模型、密钥与输入内容');
     }
     const req = http.createHttp(); this.cancel(); this.request = req;
@@ -21,13 +24,14 @@ export class AiClient {
     try {
       const response = await req.request(endpoint, { method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, extraData: JSON.stringify(body),
-        connectTimeout: 15000, readTimeout: 30000, expectDataType: http.HttpDataType.STRING, usingCache: false });
+        connectTimeout: 15000, readTimeout: 30000, expectDataType: http.HttpDataType.STRING, usingCache: false }).catch(() => { throw new Error(AiConfigService.failure('network')); });
       if (this.request !== req) { throw new Error('已取消'); }
-      if (response.responseCode !== 200) { throw new Error('AI 请求失败，HTTP ' + response.responseCode.toString() + '；请检查鉴权、模型和配额'); }
+      if (response.responseCode !== 200) { throw new Error(AiConfigService.failure('network', 0, response.responseCode)); }
       const raw = response.result as string; if (raw.length > 100000) { throw new Error('AI 响应过长'); }
-      const doc = JSON.parse(raw) as CompletionResponse;
+      let doc: CompletionResponse;
+      try { doc = JSON.parse(raw) as CompletionResponse; } catch { throw new Error('服务响应不是有效 JSON，请检查接口协议'); }
       if (!doc.choices?.length || typeof doc.choices[0].message?.content !== 'string') { throw new Error('服务未返回兼容格式'); }
-      return DraftService.decode(doc.choices[0].message.content, now);
+      try { return DraftService.decode(doc.choices[0].message.content, now); } catch { throw new Error('服务已连接，但草稿字段或日期时间校验失败，请调整输入后重试'); }
     } finally { req.destroy(); if (this.request === req) { this.request = undefined; } }
   }
 }

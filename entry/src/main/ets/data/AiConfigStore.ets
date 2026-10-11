@@ -1,10 +1,11 @@
 import { common } from '@kit.AbilityKit';
 import { preferences, relationalStore } from '@kit.ArkData';
+import { AiConfigService } from '../services/AiConfigService';
 export interface AiConfig { endpoint: string; model: string; }
 export class AiConfigStore {
   static validate(config: AiConfig): void {
     if (!config || typeof config.endpoint !== 'string' || typeof config.model !== 'string' || config.endpoint.length > 2048 || config.model.length > 128 ||
-      (config.endpoint && !/^https:\/\/[^\s@?#]+\/[^\s?#]*$/.test(config.endpoint))) { throw new Error('AI 地址须为无凭据、无查询参数的 HTTPS 完整接口地址'); }
+      (config.endpoint && AiConfigService.endpoint(config.endpoint).length > 2048)) { throw new Error('AI 配置无效'); }
   }
   static async load(context: common.UIAbilityContext): Promise<AiConfig> {
     const db = await relationalStore.getRdbStore(context, { name: 'taiplan.db', securityLevel: relationalStore.SecurityLevel.S1 });
@@ -18,6 +19,7 @@ export class AiConfigStore {
   static async save(context: common.UIAbilityContext, config: AiConfig): Promise<void> {
     AiConfigStore.validate(config);
     const db = await relationalStore.getRdbStore(context, { name: 'taiplan.db', securityLevel: relationalStore.SecurityLevel.S1 });
-    await db.executeSql('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)', ['setting:ai_config', JSON.stringify(config)]);
+    const normalized: AiConfig = { endpoint: config.endpoint ? AiConfigService.endpoint(config.endpoint) : '', model: config.model.trim() };
+    await db.executeSql('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)', ['setting:ai_config', JSON.stringify(normalized)]);
   }
 }
