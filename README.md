@@ -9,8 +9,8 @@
 
 ## 项目介绍材料
 
-- [项目介绍 PPT（可编辑）](docs/assets/TaiPlan-Harmony-项目介绍.pptx)
-- [项目介绍 PDF](docs/assets/TaiPlan-Harmony-项目介绍.pdf)
+- [项目介绍 PPT（可编辑）](TaiPlan-Harmony-项目介绍.pptx)
+- [项目介绍 PDF](TaiPlan-Harmony-项目介绍.pdf)
 
 ## 1.0.1 更新
 
